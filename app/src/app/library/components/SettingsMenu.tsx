@@ -16,11 +16,11 @@ import MenuItem from '@/components/MenuItem';
 import Menu from '@/components/Menu';
 
 interface SettingsMenuProps {
-  onPullLibrary: (fullRefresh?: boolean, verbose?: boolean) => void;
+  onReloadLibrary: () => void;
   setIsDropdownOpen?: (isOpen: boolean) => void;
 }
 
-const SettingsMenu: React.FC<SettingsMenuProps> = ({ onPullLibrary, setIsDropdownOpen }) => {
+const SettingsMenu: React.FC<SettingsMenuProps> = ({ onReloadLibrary, setIsDropdownOpen }) => {
   const _ = useTranslation();
   const { envConfig, appService } = useEnv();
   const { themeMode, setThemeMode } = useThemeStore();
@@ -91,7 +91,7 @@ const SettingsMenu: React.FC<SettingsMenuProps> = ({ onPullLibrary, setIsDropdow
       }
       await appService.saveLibraryBooks(books);
       setRefreshMetadataProgress(_('{{count}} books refreshed', { count: refreshed }));
-      onPullLibrary(true);
+      onReloadLibrary();
       setTimeout(() => {
         setIsRefreshingMetadata(false);
         setRefreshMetadataProgress('');

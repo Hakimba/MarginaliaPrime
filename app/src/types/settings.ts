@@ -50,8 +50,6 @@ export interface SystemSettings {
   localBooksDir: string;
   customRootDir?: string;
 
-  keepLogin: boolean;
-  autoUpload: boolean;
   alwaysOnTop: boolean;
   openBookInNewWindow: boolean;
   screenWakeLock: boolean;
@@ -64,7 +62,6 @@ export interface SystemSettings {
   autoImportBooksOnOpen: boolean;
   savedBookCoverForLockScreen: string;
   savedBookCoverForLockScreenPath: string;
-  telemetryEnabled: boolean;
   libraryViewMode: LibraryViewModeType;
   librarySortBy: LibrarySortByType;
   librarySortAscending: boolean;
@@ -77,10 +74,6 @@ export interface SystemSettings {
   metadataSeriesCollapsed: boolean;
   metadataOthersCollapsed: boolean;
   metadataDescriptionCollapsed: boolean;
-
-  lastSyncedAtBooks: number;
-  lastSyncedAtConfigs: number;
-  lastSyncedAtNotes: number;
 
   globalReadSettings: ReadSettings;
   globalViewSettings: ViewSettings;

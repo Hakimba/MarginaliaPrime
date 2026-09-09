@@ -597,8 +597,10 @@ const FoliateViewer: React.FC<{
 
       const lastLocation = config.location;
       if (lastLocation) {
+        perfMark('book:init-start', { bookKey, lastLocation: String(lastLocation).slice(0, 80) });
         await view.init({ lastLocation });
       } else {
+        perfMark('book:init-start', { bookKey, lastLocation: null });
         await view.goToFraction(0);
       }
       setViewInited(bookKey, true);

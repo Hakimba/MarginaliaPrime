@@ -9,12 +9,11 @@ import { OverlayScrollbarsComponent, OverlayScrollbarsComponentRef } from 'overl
 import 'overlayscrollbars/overlayscrollbars.css';
 
 import { Book } from '@/types/book';
-import { AppService, DeleteAction } from '@/types/system';
+import { AppService } from '@/types/system';
 import { navigateToLibrary, navigateToReader } from '@/utils/nav';
 import { formatAuthors, formatTitle, getPrimaryLanguage, listFormater } from '@/utils/book';
 import { getImportErrorMessage } from '@/services/errors';
 import { eventDispatcher } from '@/utils/event';
-import { throttle } from '@/utils/throttle';
 import { getDirPath, getFilename, joinPaths } from '@/utils/path';
 import { parseOpenWithFiles } from '@/helpers/openWith';
 import { perfMark, perfAutoOpen } from '@/utils/perf';
@@ -75,11 +74,8 @@ const LibraryPageWithSearchParams = () => {
 const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchParams | null }) => {
   const router = useAppRouter();
   const { envConfig, appService } = useEnv();
-  const user = null;
   const {
     library: libraryBooks,
-    isSyncing,
-    syncProgress,
     updateBook,
     updateBooks,
     setLibrary,
@@ -108,9 +104,6 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
     groupBy: typeof LibraryGroupByType.Series | typeof LibraryGroupByType.Author;
     groupName: string;
   } | null>(null);
-  const [booksTransferProgress, setBooksTransferProgress] = useState<{
-    [key: string]: number | null;
-  }>({});
   const [pendingNavigationBookIds, setPendingNavigationBookIds] = useState<string[] | null>(null);
   const isInitiating = useRef(false);
 
@@ -172,15 +165,8 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
 
   useOpenWithBooks();
 
-  const pullLibrary = async (_fullRefresh?: boolean, _verbose?: boolean) => {};
-  const pushLibrary = async () => {};
   const { isDragging } = useDragDropImport();
 
-  usePullToRefresh(
-    containerRef,
-    pullLibrary.bind(null, false, true),
-    pullLibrary.bind(null, true, true),
-  );
   useScreenWakeLock(settings.screenWakeLock);
 
   useShortcuts({
@@ -233,6 +219,8 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [envConfig, appService]);
 
+  usePullToRefresh(containerRef, handleRefreshLibrary);
+
   useEffect(() => {
     if (appService?.hasWindow) {
       const currentWebview = getCurrentWebview();
@@ -280,12 +268,6 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
           const book = await appService.importBook(file, libraryBooks, true, true, false, temp);
           if (book) {
             bookIds.push(book.hash);
-          }
-          if (user && book && !temp && !book.uploadedAt && settings.autoUpload) {
-            setTimeout(() => {
-              // transferManager.queueUpload(book);
-              // wait for the initialization of the transfer manager and opening of the book
-            }, 3000);
           }
         } catch (_error) {
 
@@ -341,10 +323,6 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
     if (isInitiating.current) return;
     isInitiating.current = true;
 
-    const initLogin = async () => {
-      // Auth stripped
-    };
-
     const loadingTimeout = setTimeout(() => setLoading(true), 300);
     const initLibrary = async () => {
       const appService = await envConfig.getAppService();
@@ -380,7 +358,6 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
       return false;
     };
 
-    initLogin();
     initLibrary();
     return () => {
       setCheckOpenWithBooks(false);
@@ -455,9 +432,6 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
           book.groupId = getGroupId(groupName);
         }
 
-        if (user && !book.uploadedAt && settings.autoUpload) {
-          // transferManager.queueUpload(book);
-        }
         successfulImports.push(book.title);
         return book;
       } catch (error) {
@@ -476,8 +450,6 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
       const importedBooks = (await Promise.all(batch.map(processFile))).filter((book) => !!book);
       await updateBooks(envConfig, importedBooks);
     }
-
-    pushLibrary();
 
     if (failedImports.length > 0) {
       const filenames = failedImports.map((f) => f.filename);
@@ -504,101 +476,24 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
     setLoading(false);
   };
 
-  const updateBookTransferProgress = throttle((bookHash: string, progress: { progress: number; total: number }) => {
-    if (progress.total === 0) return;
-    const progressPct = (progress.progress / progress.total) * 100;
-    setBooksTransferProgress((prev) => ({
-      ...prev,
-      [bookHash]: progressPct,
-    }));
-  }, 500);
-
-  const handleBookUpload = useCallback(
-    async (_book: Book, _syncBooks = true) => {
-      // Transfer stripped
+  const handleBookDelete = async (book: Book) => {
+    try {
+      await appService?.deleteBook(book);
+      await updateBook(envConfig, book);
+      clearBookData(book.hash);
+      eventDispatcher.dispatch('toast', {
+        type: 'info',
+        timeout: 1000,
+        message: _('Book deleted: {{title}}', { title: book.title }),
+      });
+      return true;
+    } catch {
+      eventDispatcher.dispatch('toast', {
+        message: _('Failed to delete book: {{title}}', { title: book.title }),
+        type: 'error',
+      });
       return false;
-    },
-    [],
-  );
-
-  const handleBookDownload = useCallback(
-    async (book: Book, downloadOptions: { redownload?: boolean; queued?: boolean } = {}) => {
-      const { redownload = false, queued = false } = downloadOptions;
-      if (redownload || !queued) {
-        try {
-          await appService?.downloadBook(book, false, redownload, (progress) => {
-            updateBookTransferProgress(book.hash, progress);
-          });
-          await updateBook(envConfig, book);
-          eventDispatcher.dispatch('toast', {
-            type: 'info',
-            timeout: 2000,
-            message: _('Book downloaded: {{title}}', {
-              title: book.title,
-            }),
-          });
-          return true;
-        } catch {
-          eventDispatcher.dispatch('toast', {
-            message: _('Failed to download book: {{title}}', {
-              title: book.title,
-            }),
-            type: 'error',
-          });
-          return false;
-        }
-      }
-
-      // Transfer stripped
-      return false;
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [appService],
-  );
-
-  const handleBookDelete = (deleteAction: DeleteAction) => {
-    return async (book: Book, syncBooks = true) => {
-      const deletionMessages = {
-        both: _('Book deleted: {{title}}', { title: book.title }),
-        cloud: _('Deleted cloud backup of the book: {{title}}', { title: book.title }),
-        local: _('Deleted local copy of the book: {{title}}', { title: book.title }),
-      };
-      const deletionFailMessages = {
-        both: _('Failed to delete book: {{title}}', { title: book.title }),
-        cloud: _('Failed to delete cloud backup of the book: {{title}}', { title: book.title }),
-        local: _('Failed to delete local copy of the book: {{title}}', { title: book.title }),
-      };
-
-      try {
-        // Handle local deletion immediately
-        if (deleteAction === 'local' || deleteAction === 'both') {
-          await appService?.deleteBook(book, 'local');
-          if (deleteAction === 'both') {
-            book.deletedAt = Date.now();
-            book.downloadedAt = null;
-            book.coverDownloadedAt = null;
-          }
-          await updateBook(envConfig, book);
-          clearBookData(book.hash);
-          if (syncBooks) pushLibrary();
-        }
-
-        // Cloud deletion stripped
-
-        eventDispatcher.dispatch('toast', {
-          type: 'info',
-          timeout: 1000,
-          message: deletionMessages[deleteAction],
-        });
-        return true;
-      } catch {
-        eventDispatcher.dispatch('toast', {
-          message: deletionFailMessages[deleteAction],
-          type: 'error',
-        });
-        return false;
-      }
-    };
+    }
   };
 
   const _handleUpdateMetadata = async (book: Book, metadata: BookMetadata) => {
@@ -729,7 +624,7 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
         <LibraryHeader
           isSelectMode={isSelectMode}
           isSelectAll={isSelectAll}
-          onPullLibrary={pullLibrary}
+          onReloadLibrary={handleRefreshLibrary}
           onImportBooksFromFiles={handleImportBooksFromFiles}
           onImportBooksFromDirectory={
             appService?.canReadExternalDir ? handleImportBooksFromDirectory : undefined
@@ -738,18 +633,8 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
           onSelectAll={handleSelectAll}
           onDeselectAll={handleDeselectAll}
         />
-        <progress
-          aria-label={_('Library Sync Progress')}
-          aria-hidden={isSyncing ? 'false' : 'true'}
-          className={clsx(
-            'progress progress-success absolute bottom-0 left-0 right-0 h-1 translate-y-[2px] transition-opacity duration-200 sm:translate-y-[4px]',
-            isSyncing ? 'opacity-100' : 'opacity-0',
-          )}
-          value={syncProgress * 100}
-          max='100'
-        />
       </div>
-      {(loading || isSyncing) && (
+      {loading && (
         <div className='fixed inset-0 z-50 flex items-center justify-center'>
           <Spinner loading />
         </div>
@@ -827,14 +712,10 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
                 isSelectAll={isSelectAll}
                 isSelectNone={isSelectNone}
                 handleImportBooks={handleImportBooksFromFiles}
-                handleBookUpload={handleBookUpload}
-                handleBookDownload={handleBookDownload}
-                handleBookDelete={handleBookDelete('both')}
+                handleBookDelete={handleBookDelete}
                 handleSetSelectMode={handleSetSelectMode}
                 handleShowDetailsBook={handleShowDetailsBook}
                 handleLibraryNavigation={handleLibraryNavigation}
-                booksTransferProgress={booksTransferProgress}
-                handlePushLibrary={pushLibrary}
               />
             </div>
           </OverlayScrollbarsComponent>
@@ -861,11 +742,7 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
           isOpen={!!showDetailsBook}
           book={showDetailsBook}
           onClose={() => setShowDetailsBook(null)}
-          handleBookUpload={handleBookUpload}
-          handleBookDownload={handleBookDownload}
-          handleBookDelete={handleBookDelete('both')}
-          handleBookDeleteCloudBackup={handleBookDelete('cloud')}
-          handleBookDeleteLocalCopy={handleBookDelete('local')}
+          handleBookDelete={handleBookDelete}
         />
       )}
       <MigrateDataWindow />

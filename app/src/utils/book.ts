@@ -13,9 +13,6 @@ export const getDir = (book: Book) => {
 export const getLibraryFilename = () => {
   return 'library.json';
 };
-export const getRemoteBookFilename = (book: Book) => {
-  return `${book.hash}/${makeSafeFilename(book.sourceTitle || book.title)}.${EXTS[book.format]}`;
-};
 export const getLocalBookFilename = (book: Book) => {
   return `${book.hash}/${makeSafeFilename(book.sourceTitle || book.title)}.${EXTS[book.format]}`;
 };

@@ -1,14 +1,12 @@
 import { SystemSettings } from './settings';
 import { Book, BookConfig, BookContent, ViewSettings } from './book';
 import { BookMetadata } from '@/libs/document';
-import { ProgressHandler } from '@/utils/transfer';
 import { CustomFont, CustomFontInfo } from '@/styles/fonts';
 import { CustomTextureInfo } from '@/styles/textures';
 export type AppPlatform = 'web' | 'tauri' | 'node';
 export type OsPlatform = 'android' | 'ios' | 'macos' | 'windows' | 'linux' | 'unknown';
 // prettier-ignore
 export type BaseDir = | 'Books' | 'Settings' | 'Data' | 'Fonts' | 'Images' | 'Log' | 'Cache' | 'Temp' | 'None';
-export type DeleteAction = 'cloud' | 'local' | 'both';
 export type SelectDirectoryMode = 'read' | 'write';
 export type DistChannel = 'marginalia' | 'playstore' | 'appstore' | 'unknown';
 
@@ -129,23 +127,7 @@ export interface AppService {
     transient?: boolean,
   ): Promise<Book | null>;
   refreshBookMetadata(book: Book): Promise<boolean>;
-  deleteBook(book: Book, deleteAction: DeleteAction): Promise<void>;
-  uploadBook(book: Book, onProgress?: ProgressHandler): Promise<void>;
-  downloadBook(
-    book: Book,
-    onlyCover?: boolean,
-    redownload?: boolean,
-    onProgress?: ProgressHandler,
-  ): Promise<void>;
-  uploadFileToCloud(
-    lfp: string,
-    cfp: string,
-    base: BaseDir,
-    handleProgress: ProgressHandler,
-    hash: string,
-    temp?: boolean,
-  ): Promise<string | undefined>;
-  downloadBookCovers(books: Book[], redownload?: boolean): Promise<void>;
+  deleteBook(book: Book): Promise<void>;
   exportBook(book: Book): Promise<boolean>;
   isBookAvailable(book: Book): Promise<boolean>;
   getBookFileSize(book: Book): Promise<number | null>;

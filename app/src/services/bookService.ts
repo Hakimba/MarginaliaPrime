@@ -509,15 +509,22 @@ export async function saveBookConfig(
   await fs.writeFile(getConfigFilename(book), 'Books', serializedConfig);
 }
 
-export async function fetchBookDetails(
-  fs: FileSystem,
-  book: Book,
-  downloadBookFn: (book: Book) => Promise<void>,
-): Promise<BookDoc['metadata']> {
-  const fp = getLocalBookFilename(book);
-  if (!(await fs.exists(fp, 'Books')) && book.uploadedAt) {
-    await downloadBookFn(book);
+/**
+ * Delete a book from the local library: remove its file and cover from disk
+ * and mark the library entry as deleted.
+ */
+export async function deleteBook(fs: FileSystem, book: Book): Promise<void> {
+  for (const fp of [getLocalBookFilename(book), getCoverFilename(book)]) {
+    if (await fs.exists(fp, 'Books')) {
+      await fs.removeFile(fp, 'Books');
+    }
   }
+  book.deletedAt = Date.now();
+  book.downloadedAt = null;
+  book.coverDownloadedAt = null;
+}
+
+export async function fetchBookDetails(fs: FileSystem, book: Book): Promise<BookDoc['metadata']> {
   const { file } = await loadBookContent(fs, book);
   const bookDoc = (await new DocumentLoader(file).open()).book;
   const f = file as ClosableFile;

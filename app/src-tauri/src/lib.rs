@@ -221,6 +221,18 @@ pub fn run() {
                             var r = e.reason;
                             report('unhandled rejection: ' + (r && (r.stack || r.message) || String(r)));
                         }});
+                        ['warn', 'error'].forEach(function (level) {{
+                            var orig = console[level].bind(console);
+                            console[level] = function () {{
+                                var parts = [];
+                                for (var i = 0; i < arguments.length; i++) {{
+                                    var a = arguments[i];
+                                    parts.push(a && a.stack ? a.stack : (typeof a === 'object' ? JSON.stringify(a) : String(a)));
+                                }}
+                                report('console.' + level + ': ' + parts.join(' ').slice(0, 2000));
+                                orig.apply(console, arguments);
+                            }};
+                        }});
                     }})();
                     window.addEventListener('DOMContentLoaded', function() {{
                         document.documentElement.classList.add('edge-to-edge');

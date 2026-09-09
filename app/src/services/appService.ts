@@ -3,7 +3,6 @@ import {
   AppPlatform,
   AppService,
   BaseDir,
-  DeleteAction,
   DistChannel,
   FileItem,
   FileSystem,
@@ -15,12 +14,10 @@ import { Book, BookConfig, BookContent, ViewSettings } from '@/types/book';
 
 
 import { getOSPlatform } from '@/utils/misc';
-import { ProgressHandler } from '@/utils/transfer';
 import { CustomTextureInfo } from '@/styles/textures';
 import { CustomFont, CustomFontInfo } from '@/styles/fonts';
 
 import * as BookSvc from './bookService';
-import * as CloudSvc from './cloudService';
 import * as FontSvc from './fontService';
 import * as ImageSvc from './imageService';
 import * as LibrarySvc from './libraryService';
@@ -207,57 +204,8 @@ export abstract class BaseAppService implements AppService {
     );
   }
 
-  async deleteBook(book: Book, deleteAction: DeleteAction): Promise<void> {
-    return CloudSvc.deleteBook(this.fs, book, deleteAction);
-  }
-
-  async uploadFileToCloud(
-    lfp: string,
-    cfp: string,
-    base: BaseDir,
-    handleProgress: ProgressHandler,
-    hash: string,
-    temp: boolean = false,
-  ) {
-    return CloudSvc.uploadFileToCloud(
-      this.fs,
-      this.resolveFilePath.bind(this),
-      lfp,
-      cfp,
-      base,
-      handleProgress,
-      hash,
-      temp,
-    );
-  }
-
-  async uploadBook(book: Book, onProgress?: ProgressHandler): Promise<void> {
-    return CloudSvc.uploadBook(this.fs, this.resolveFilePath.bind(this), book, onProgress);
-  }
-
-  async downloadCloudFile(lfp: string, cfp: string, onProgress: ProgressHandler) {
-    return CloudSvc.downloadCloudFile(this, this.localBooksDir, lfp, cfp, onProgress);
-  }
-
-  async downloadBookCovers(books: Book[]): Promise<void> {
-    return CloudSvc.downloadBookCovers(this, this.fs, this.localBooksDir, books);
-  }
-
-  async downloadBook(
-    book: Book,
-    onlyCover = false,
-    redownload = false,
-    onProgress?: ProgressHandler,
-  ): Promise<void> {
-    return CloudSvc.downloadBook(
-      this,
-      this.fs,
-      this.localBooksDir,
-      book,
-      onlyCover,
-      redownload,
-      onProgress,
-    );
+  async deleteBook(book: Book): Promise<void> {
+    return BookSvc.deleteBook(this.fs, book);
   }
 
   async exportBook(book: Book): Promise<boolean> {
@@ -291,7 +239,7 @@ export abstract class BaseAppService implements AppService {
   }
 
   async fetchBookDetails(book: Book) {
-    return BookSvc.fetchBookDetails(this.fs, book, this.downloadBook.bind(this));
+    return BookSvc.fetchBookDetails(this.fs, book);
   }
 
   async saveBookConfig(book: Book, config: BookConfig, settings?: SystemSettings) {
