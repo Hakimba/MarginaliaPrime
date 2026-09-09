@@ -31,8 +31,23 @@ make help        # liste des cibles
 make install     # pnpm install --frozen-lockfile + copie des vendors pdf.js
 make dev         # pnpm tauri dev (première compilation Rust : 10–20 min)
 make lint        # eslint + cargo fmt --check + clippy
-make build       # binaire de production
+make build       # binaire de production (avec bundles deb/rpm/AppImage)
+cd app && pnpm tauri build --no-bundle   # binaire release seul : app/src-tauri/target/release/Marginalia
 ```
+
+Piège : ne jamais produire le binaire avec `cargo build --release` directement. Sans la CLI Tauri,
+l'embarquement de `app/out/` est incomplet ou périmé et l'app démarre sur un webview vide, sans aucune
+erreur. Toujours `pnpm tauri build --no-bundle` (ou `make build`), qui reconstruit le frontend, ré-embarque
+les assets et pose le binaire `target/release/Marginalia`. `cargo clippy` / `cargo fmt` restent utilisables
+pour la vérification.
+
+Erreurs JavaScript : le script d'initialisation de la fenêtre (`lib.rs`) relaie `window.onerror` et les
+rejets non gérés vers le log Rust, préfixe `[js]`, visibles sur stdout et dans
+`~/.local/share/com.eddmann.marginalia/logs/Marginalia.log`.
+
+Mesure de performance : `scripts/perf-run.sh <label> <binaire> [livre] [secondes]` lit les marqueurs
+`[perf]` de `app/src/utils/perf.ts` ; `MARGINALIA_PERF_OPEN=<hash>` ouvre un livre dès la bibliothèque
+prête pour mesurer le chemin du clic. Résultats consignés dans `docs/harness/PERF.md`.
 
 Prérequis machine : Rust stable (rustup), pnpm 10.29.2 via corepack, Node ≥ 20 (fnm), paquets
 Debian `libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev build-essential libssl-dev`.

@@ -48,9 +48,11 @@ export const perfAutoOpen = async (open: (hash: string) => void) => {
     if (hash) {
       perfMark('perf:auto-open', { hash });
       open(hash);
+    } else {
+      perfMark('perf:auto-open-none');
     }
-  } catch {
-    // not running inside Tauri
+  } catch (e) {
+    perfMark('perf:auto-open-error', { error: String(e) });
   }
 };
 

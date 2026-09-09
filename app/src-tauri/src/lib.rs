@@ -63,8 +63,12 @@ fn get_files_from_argv(argv: Vec<String>) -> Vec<PathBuf> {
     files
 }
 
-/// Render file paths as a JavaScript array literal for the init script.
+/// Render file paths as a JavaScript array literal for the init script,
+/// or `null` when no file was given (the JS side checks for a defined array).
 fn files_to_js_array(files: &[PathBuf]) -> String {
+    if files.is_empty() {
+        return "null".to_string();
+    }
     let items = files
         .iter()
         .map(|f| {
@@ -202,6 +206,22 @@ pub fn run() {
                     if ({cli_access}) window.__MARGINALIA_CLI_ACCESS = true;
                     if ({is_appimage}) window.__MARGINALIA_IS_APPIMAGE = true;
                     window.OPEN_WITH_FILES = {open_with_files};
+                    (function () {{
+                        var report = function (msg) {{
+                            try {{
+                                window.__TAURI_INTERNALS__.invoke('plugin:log|log', {{
+                                    level: 5, message: '[js] ' + msg, location: 'webview'
+                                }});
+                            }} catch (_) {{}}
+                        }};
+                        window.addEventListener('error', function (e) {{
+                            report((e.message || 'error') + ' @ ' + (e.filename || '?') + ':' + (e.lineno || 0));
+                        }});
+                        window.addEventListener('unhandledrejection', function (e) {{
+                            var r = e.reason;
+                            report('unhandled rejection: ' + (r && (r.stack || r.message) || String(r)));
+                        }});
+                    }})();
                     window.addEventListener('DOMContentLoaded', function() {{
                         document.documentElement.classList.add('edge-to-edge');
                     }});
