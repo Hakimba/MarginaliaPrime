@@ -9,7 +9,6 @@ declare global {
 
 export const isTauriAppPlatform = () => true;
 export const isWebAppPlatform = () => false;
-export const hasCli = () => window.__MARGINALIA_CLI_ACCESS === true;
 export const isPWA = () => window.matchMedia('(display-mode: standalone)').matches;
 const getBaseUrl = () => MARGINALIA_WEB_BASE_URL;
 

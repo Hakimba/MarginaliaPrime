@@ -4,14 +4,11 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_fs::FsExt;
 
 #[cfg(desktop)]
-use tauri::{Listener, Url};
+use tauri::Url;
 
 mod dir_scanner;
 
 use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
-
-#[cfg(not(target_os = "android"))]
-use tauri_plugin_opener::OpenerExt;
 
 #[cfg(desktop)]
 fn allow_file_in_scopes(app: &AppHandle, files: Vec<PathBuf>) {
@@ -66,24 +63,20 @@ fn get_files_from_argv(argv: Vec<String>) -> Vec<PathBuf> {
     files
 }
 
-#[cfg(desktop)]
-fn set_window_open_with_files(app: &AppHandle, files: Vec<PathBuf>) {
-    let files = files
-        .into_iter()
+/// Render file paths as a JavaScript array literal for the init script.
+fn files_to_js_array(files: &[PathBuf]) -> String {
+    let items = files
+        .iter()
         .map(|f| {
             let file = f
                 .to_string_lossy()
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"");
-            format!("\"{file}\"",)
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            format!("\"{file}\"")
         })
         .collect::<Vec<_>>()
         .join(",");
-    let window = app.get_webview_window("main").unwrap();
-    let script = format!("window.OPEN_WITH_FILES = [{files}];");
-    if let Err(e) = window.eval(&script) {
-        eprintln!("Failed to set open files variable: {e}");
-    }
+    format!("[{items}]")
 }
 
 #[tauri::command]
@@ -168,40 +161,27 @@ pub fn run() {
             .build(),
     );
 
-    let builder = builder.plugin(tauri_plugin_deep_link::init());
-
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
 
     builder
         .setup(|#[allow(unused_variables)] app| {
+            // Files given on the command line ("open with"): allow them in the
+            // fs/asset scopes and hand them to the webview through the init
+            // script below, so no plugin round-trip is needed at startup.
             #[cfg(desktop)]
-            {
-                let files = get_files_from_argv(std::env::args().collect());
-                if !files.is_empty() {
-                    let app_handle = app.handle().clone();
-                    allow_file_in_scopes(&app_handle, files.clone());
-                    app.listen("window-ready", move |_| {
-                        println!("Window is ready, proceeding to handle files.");
-                        set_window_open_with_files(&app_handle, files.clone());
-                    });
-                }
+            let argv_files = get_files_from_argv(std::env::args().collect());
+            #[cfg(not(desktop))]
+            let argv_files: Vec<PathBuf> = Vec::new();
+            #[cfg(desktop)]
+            if !argv_files.is_empty() {
+                allow_file_in_scopes(app.handle(), argv_files.clone());
             }
+            let open_with_files_js = files_to_js_array(&argv_files);
 
             #[cfg(desktop)]
             {
                 allow_dir_in_scopes(app.handle(), &PathBuf::from(get_executable_dir()));
-            }
-
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            {
-                use tauri_plugin_deep_link::DeepLinkExt;
-                let _ = app.deep_link().register_all();
-            }
-
-            #[cfg(desktop)]
-            {
-                app.handle().plugin(tauri_plugin_cli::init())?;
             }
 
             #[cfg(desktop)]
@@ -221,27 +201,20 @@ pub fn run() {
                 r#"
                     if ({cli_access}) window.__MARGINALIA_CLI_ACCESS = true;
                     if ({is_appimage}) window.__MARGINALIA_IS_APPIMAGE = true;
+                    window.OPEN_WITH_FILES = {open_with_files};
                     window.addEventListener('DOMContentLoaded', function() {{
                         document.documentElement.classList.add('edge-to-edge');
                     }});
                 "#,
                 cli_access = cli_access,
                 is_appimage = is_appimage,
+                open_with_files = open_with_files_js,
             );
 
-            let app_handle = app.handle().clone();
             let win_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .background_throttling(BackgroundThrottlingPolicy::Disabled)
                 .background_color(tauri::window::Color(50, 49, 48, 255))
-                .initialization_script(&init_script)
-                .on_navigation(move |url| {
-                    if url.scheme() == "alipays" || url.scheme() == "alipay" {
-                        let url_str = url.as_str().to_string();
-                        let _ = app_handle.opener().open_url(url_str, None::<&str>);
-                        return false;
-                    }
-                    true
-                });
+                .initialization_script(&init_script);
 
             #[cfg(desktop)]
             let win_builder = win_builder.inner_size(800.0, 600.0).resizable(true);
