@@ -1,5 +1,4 @@
 import { ViewSettings } from '@/types/book';
-import hljs from 'highlight.js/lib/common';
 
 export const CODE_LANGUAGES = [
   'auto-detect',
@@ -43,7 +42,7 @@ export const CODE_LANGUAGES = [
 export type CodeLanguage = (typeof CODE_LANGUAGES)[number];
 
 /** Toggle on or off the highlightjs stylesheet from the DOM and add relevant language styles */
-export const manageSyntaxHighlighting = (doc: Document, viewSettings: ViewSettings) => {
+export const manageSyntaxHighlighting = async (doc: Document, viewSettings: ViewSettings) => {
   const styleId = 'highlight-js-theme-style'; // arbitrary css id
   const { codeHighlighting, codeLanguage } = viewSettings;
 
@@ -72,6 +71,8 @@ export const manageSyntaxHighlighting = (doc: Document, viewSettings: ViewSettin
   // Find all <pre> elements in available content
   const codeBlocks = doc.querySelectorAll('pre');
 
+  // Loaded lazily: highlight.js is ~200 KB and only needed when the option is on.
+  const { default: hljs } = await import('highlight.js/lib/common');
   // https://github.com/highlightjs/highlight.js/wiki/security
   // I believe this is valid in this use case to ignore this warning.
   hljs.configure({ ignoreUnescapedHTML: true });

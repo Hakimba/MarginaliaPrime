@@ -120,6 +120,11 @@ export const mountAdditionalFonts = async (document: Document, isCJK = false) =>
       link.rel = child.getAttribute('rel') || '';
       link.href = child.getAttribute('href') || '';
       link.crossOrigin = child.getAttribute('crossorigin') || '';
+      // Load remote font CSS without blocking first paint: apply it once fetched.
+      link.media = 'print';
+      link.onload = () => {
+        link.media = 'all';
+      };
 
       document.head.appendChild(link);
     }

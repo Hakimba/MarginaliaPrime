@@ -135,13 +135,21 @@ export abstract class BaseAppService implements AppService {
     return Settings.getDefaultViewSettings(this.settingsCtx);
   }
 
+  // settings.json was read 3-4 times during startup (env init, providers,
+  // library, reader). Cache the parsed object; saveSettings refreshes it.
+  private settingsCache: SystemSettings | null = null;
+
   async loadSettings(): Promise<SystemSettings> {
+    if (this.settingsCache) return this.settingsCache;
     const settings = await Settings.loadSettings(this.settingsCtx);
     this.localBooksDir = settings.localBooksDir;
+    this.settingsCache = settings;
     return settings;
   }
 
   async saveSettings(settings: SystemSettings): Promise<void> {
+    this.settingsCache = settings;
+    this.localBooksDir = settings.localBooksDir;
     await Settings.saveSettings(this.fs, settings);
   }
 

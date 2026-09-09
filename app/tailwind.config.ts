@@ -5,18 +5,7 @@ import typography from '@tailwindcss/typography';
 import plugin from 'tailwindcss/plugin';
 
 const config: Config = {
-  content: [
-    './src/pages/**/*.{js,ts,jsx,tsx,mdx}',
-    './src/components/**/*.{js,ts,jsx,tsx,mdx}',
-    './src/app/**/*.{js,ts,jsx,tsx,mdx}',
-  ],
-  safelist: [
-    { pattern: /bg-./ },
-    { pattern: /text-./ },
-    { pattern: /fill-./ },
-    { pattern: /decoration-./ },
-    { pattern: /tooltip-./ },
-  ],
+  content: ['./src/components/**/*.{js,ts,jsx,tsx,mdx}', './src/app/**/*.{js,ts,jsx,tsx,mdx}'],
   theme: {
     extend: {
       fontFamily: {

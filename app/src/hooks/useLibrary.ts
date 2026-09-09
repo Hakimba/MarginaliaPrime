@@ -17,7 +17,11 @@ export const useLibrary = () => {
       const appService = await envConfig.getAppService();
       const settings = await appService.loadSettings();
       setSettings(settings);
-      setLibrary(await appService.loadLibraryBooks());
+      // Coming from the library page the store is already populated; only a
+      // fresh window (or a direct launch into the reader) needs to load it.
+      if (useLibraryStore.getState().library.length === 0) {
+        setLibrary(await appService.loadLibraryBooks());
+      }
       setLibraryLoaded(true);
     };
 
