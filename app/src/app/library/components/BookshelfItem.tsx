@@ -1,7 +1,6 @@
 import clsx from 'clsx';
 import { useCallback } from 'react';
 import { useEnv } from '@/context/EnvContext';
-import { useLibraryStore } from '@/store/libraryStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import { useTranslation } from '@/hooks/useTranslation';
 import { useAppRouter } from '@/hooks/useAppRouter';
@@ -87,16 +86,9 @@ interface BookshelfItemProps {
   coverFit: LibraryCoverFitType;
   isSelectMode: boolean;
   itemSelected: boolean;
-  transferProgress: number | null;
-  setLoading: React.Dispatch<React.SetStateAction<boolean>>;
   toggleSelection: (hash: string) => void;
   handleGroupBooks: () => void;
-  handleBookDownload: (
-    book: Book,
-    options?: { redownload?: boolean; queued?: boolean },
-  ) => Promise<boolean>;
-  handleBookUpload: (book: Book, syncBooks?: boolean) => Promise<boolean>;
-  handleBookDelete: (book: Book, syncBooks?: boolean) => Promise<boolean>;
+  handleBookDelete: (book: Book) => Promise<boolean>;
   handleSetSelectMode: (selectMode: boolean) => void;
   handleShowDetailsBook: (book: Book) => void;
   handleLibraryNavigation: (targetGroup: string) => void;
@@ -109,12 +101,8 @@ const BookshelfItem: React.FC<BookshelfItemProps> = ({
   coverFit,
   isSelectMode,
   itemSelected,
-  transferProgress,
-  setLoading,
   toggleSelection,
   handleGroupBooks,
-  handleBookUpload,
-  handleBookDownload,
   handleSetSelectMode,
   handleShowDetailsBook,
   handleLibraryNavigation,
@@ -122,53 +110,24 @@ const BookshelfItem: React.FC<BookshelfItemProps> = ({
 }) => {
   const _ = useTranslation();
   const router = useAppRouter();
-  const { envConfig, appService } = useEnv();
+  const { appService } = useEnv();
   const { settings } = useSettingsStore();
-  const { updateBook } = useLibraryStore();
 
   const showBookDetailsModal = useCallback(async (book: Book) => {
     handleShowDetailsBook(book);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const makeBookAvailable = async (book: Book) => {
-    if (book.uploadedAt && !book.downloadedAt) {
-      if (await appService?.isBookAvailable(book)) {
-        if (!book.downloadedAt || !book.coverDownloadedAt) {
-          book.downloadedAt = Date.now();
-          book.coverDownloadedAt = Date.now();
-          await updateBook(envConfig, book);
-        }
-        return true;
-      }
-      let available = false;
-      const loadingTimeout = setTimeout(() => setLoading(true), 200);
-      try {
-        available = await handleBookDownload(book, { queued: false });
-        await updateBook(envConfig, book);
-      } finally {
-        if (loadingTimeout) clearTimeout(loadingTimeout);
-        setLoading(false);
-        return available;
-      }
-    }
-    return true;
-  };
-
   const handleBookClick = useCallback(
     async (book: Book) => {
       if (isSelectMode) {
         toggleSelection(book.hash);
+      } else if (appService?.hasWindow && settings.openBookInNewWindow) {
+        showReaderWindow(appService, [book.hash]);
       } else {
-        const available = await makeBookAvailable(book);
-        if (!available) return;
-        if (appService?.hasWindow && settings.openBookInNewWindow) {
-          showReaderWindow(appService, [book.hash]);
-        } else {
-          setTimeout(() => {
-            navigateToReader(router, [book.hash]);
-          }, 0);
-        }
+        setTimeout(() => {
+          navigateToReader(router, [book.hash]);
+        }, 0);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -240,18 +199,6 @@ const BookshelfItem: React.FC<BookshelfItemProps> = ({
         showBookDetailsModal(book);
       },
     });
-    const downloadBookMenuItem = await MenuItem.new({
-      text: _('Download Book'),
-      action: async () => {
-        handleBookDownload(book, { queued: true });
-      },
-    });
-    const uploadBookMenuItem = await MenuItem.new({
-      text: _('Upload Book'),
-      action: async () => {
-        handleBookUpload(book);
-      },
-    });
     const deleteBookMenuItem = await MenuItem.new({
       text: _('Delete'),
       action: async () => {
@@ -272,12 +219,6 @@ const BookshelfItem: React.FC<BookshelfItemProps> = ({
     }
     menu.append(showBookDetailsMenuItem);
     menu.append(showBookInFinderMenuItem);
-    if (book.uploadedAt && !book.downloadedAt) {
-      menu.append(downloadBookMenuItem);
-    }
-    if (!book.uploadedAt && book.downloadedAt) {
-      menu.append(uploadBookMenuItem);
-    }
     menu.append(deleteBookMenuItem);
     menu.popup();
   };
@@ -415,9 +356,6 @@ const BookshelfItem: React.FC<BookshelfItemProps> = ({
               coverFit={coverFit}
               isSelectMode={isSelectMode}
               bookSelected={itemSelected}
-              transferProgress={transferProgress}
-              handleBookUpload={handleBookUpload}
-              handleBookDownload={handleBookDownload}
               showBookDetailsModal={showBookDetailsModal}
             />
           ) : (

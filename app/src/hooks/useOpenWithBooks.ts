@@ -4,7 +4,6 @@ import { useEnv } from '@/context/EnvContext';
 import { useLibraryStore } from '@/store/libraryStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import { addPluginListener, PluginListener } from '@tauri-apps/api/core';
-import { onOpenUrl } from '@tauri-apps/plugin-deep-link';
 import { getCurrentWindow, getAllWindows } from '@tauri-apps/api/window';
 import { isTauriAppPlatform } from '@/services/environment';
 import { navigateToLibrary, showLibraryWindow } from '@/utils/nav';
@@ -113,17 +112,9 @@ export function useOpenWithBooks() {
       unlistenSharedIntent = initializeListeners();
     }
 
-    // iOS Open with URL event
-    const listenOpenWithFiles = async () => {
-      return await onOpenUrl((urls) => {
-        handleOpenWithFileUrl(urls);
-      });
-    };
-    const unlistenOpenUrl = listenOpenWithFiles();
     return () => {
       unlistenDeeplink.then((f) => f());
       unlistenOpenFiles.then((f) => f());
-      unlistenOpenUrl.then((f) => f());
       unlistenSharedIntent?.then((f) => f.unregister());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

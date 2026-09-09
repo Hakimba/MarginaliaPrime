@@ -64,49 +64,63 @@
     "fileAssociations": [
       {
         "name": "epub",
-        "ext": ["epub"],
+        "ext": [
+          "epub"
+        ],
         "description": "EPUB file",
         "mimeType": "application/epub+zip",
         "role": "Viewer"
       },
       {
         "name": "mobi",
-        "ext": ["mobi"],
+        "ext": [
+          "mobi"
+        ],
         "description": "MOBI file",
         "mimeType": "application/x-mobipocket-ebook",
         "role": "Viewer"
       },
       {
         "name": "azw",
-        "ext": ["azw"],
+        "ext": [
+          "azw"
+        ],
         "description": "AZW file",
         "mimeType": "application/vnd.amazon.ebook",
         "role": "Viewer"
       },
       {
         "name": "azw3",
-        "ext": ["azw3"],
+        "ext": [
+          "azw3"
+        ],
         "description": "AZW3 file",
         "mimeType": "application/vnd.amazon.mobi8-ebook",
         "role": "Viewer"
       },
       {
         "name": "fb2",
-        "ext": ["fb2"],
+        "ext": [
+          "fb2"
+        ],
         "description": "FB2 file",
         "mimeType": "application/x-fictionbook+xml",
         "role": "Viewer"
       },
       {
         "name": "cbz",
-        "ext": ["cbz"],
+        "ext": [
+          "cbz"
+        ],
         "description": "CBZ file",
         "mimeType": "application/vnd.comicbook+zip",
         "role": "Viewer"
       },
       {
         "name": "pdf",
-        "ext": ["pdf"],
+        "ext": [
+          "pdf"
+        ],
         "description": "PDF file",
         "mimeType": "application/pdf",
         "role": "Viewer"
@@ -117,36 +131,6 @@
   "plugins": {
     "fs": {
       "requireLiteralLeadingDot": false
-    },
-    "cli": {
-      "description": "Marginalia CLI",
-      "args": [
-        {
-          "name": "file1",
-          "index": 1,
-          "takesValue": true
-        },
-        {
-          "name": "file2",
-          "index": 2,
-          "takesValue": true
-        },
-        {
-          "name": "file3",
-          "index": 3,
-          "takesValue": true
-        },
-        {
-          "name": "file4",
-          "index": 4,
-          "takesValue": true
-        }
-      ]
-    },
-    "deep-link": {
-      "desktop": {
-        "schemes": ["marginalia"]
-      }
     }
   }
 }

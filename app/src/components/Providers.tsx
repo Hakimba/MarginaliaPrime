@@ -14,6 +14,7 @@ import { getLocale } from '@/utils/misc';
 import { getDirFromUILanguage } from '@/utils/rtl';
 import { DropdownProvider } from '@/context/DropdownContext';
 import { CommandPaletteProvider, CommandPalette } from '@/components/command-palette';
+import { perfMark } from '@/utils/perf';
 
 const Providers = ({ children }: { children: React.ReactNode }) => {
   const { envConfig, appService } = useEnv();
@@ -21,6 +22,10 @@ const Providers = ({ children }: { children: React.ReactNode }) => {
   const { applyBackgroundTexture } = useBackgroundTexture();
   const iconSize = useDefaultIconSize();
   useSafeAreaInsets(); // Initialize safe area insets
+
+  useEffect(() => {
+    perfMark('app:boot', { origin: Math.round(performance.timeOrigin), path: window.location.pathname });
+  }, []);
 
   useEffect(() => {
     const handlerLanguageChanged = (lng: string) => {

@@ -54,8 +54,8 @@ export class FixedLayout extends HTMLElement {
     #prerenderedSpreads = new Map()
     #spreadAccessTime = new Map()
     #maxConcurrentPreloads = 1
-    #numPrerenderedSpreads = 1
-    #maxCachedSpreads = 2
+    #numPrerenderedSpreads = 2
+    #maxCachedSpreads = 3
     #overlayers = new Map()
     #preloadQueue = []
     #activePreloads = 0

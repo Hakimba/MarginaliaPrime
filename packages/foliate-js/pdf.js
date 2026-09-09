@@ -145,6 +145,7 @@ const render = async (page, doc, zoom) => {
     }
 
     const scale = zoom * devicePixelRatio
+    const perfStart = performance.now()
     doc.documentElement.style.transform = `scale(${1 / devicePixelRatio})`
     doc.documentElement.style.transformOrigin = 'top left'
     doc.documentElement.style.setProperty('--total-scale-factor', scale)
@@ -208,6 +209,11 @@ const render = async (page, doc, zoom) => {
 
     // Bail out if superseded after async text layer render
     if (renderGenerations.get(doc) !== generation) return
+
+    globalThis.__perfMark?.('pdf:render', {
+        page: page.pageNumber, scale: Math.round(scale * 100) / 100,
+        dur: Math.round(performance.now() - perfStart),
+    })
 
     // hide "offscreen" canvases appended to document when rendering text layer
     // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/pdf_viewer.css#L51-L58
@@ -288,7 +294,7 @@ const renderPage = async (page, getImageBlob) => {
     return { src, data, onZoom }
 }
 
-const makeTOCItem = async (item, pdf) => {
+const makeTOCItem = async (item, pdf, indexByHref) => {
     let pageIndex = undefined
 
     if (item.dest) {
@@ -304,12 +310,17 @@ const makeTOCItem = async (item, pdf) => {
         }
     }
 
+    const href = item.dest ? JSON.stringify(item.dest) : ''
+    // Remember the resolved page so that TOCProgress/resolveHref do not have to
+    // round-trip to the worker a second time for every TOC entry.
+    if (href && pageIndex != null && indexByHref) indexByHref.set(href, pageIndex)
+
     return {
         label: item.title,
-        href: item.dest ? JSON.stringify(item.dest) : '',
+        href,
         index: pageIndex,
         subitems: item.items?.length
-            ? await Promise.all(item.items.map(i => makeTOCItem(i, pdf)))
+            ? await Promise.all(item.items.map(i => makeTOCItem(i, pdf, indexByHref)))
             : null,
     }
 }
@@ -355,7 +366,10 @@ export const makePDF = async file => {
     }
 
     const outline = await pdf.getOutline()
-    book.toc = outline ? await Promise.all(outline.map(item => makeTOCItem(item, pdf))) : null
+    const tocIndexByHref = new Map()
+    book.toc = outline
+        ? await Promise.all(outline.map(item => makeTOCItem(item, pdf, tocIndexByHref)))
+        : null
 
     const cache = new Map()
     const pageCache = new Map()
@@ -423,11 +437,15 @@ export const makePDF = async file => {
             // fall back to manual span construction when unavailable
             const probe = doc.createElement('canvas')
             if (probe.getContext?.('2d')) {
+                const perfStart = performance.now()
                 const textLayerInstance = new pdfjsLib.TextLayer({
                     textContentSource: await page.streamTextContent(),
                     container: textLayer, viewport: page.getViewport({ scale: 1 }),
                 })
                 await textLayerInstance.render()
+                globalThis.__perfMark?.('pdf:create-doc', {
+                    page: page.pageNumber, dur: Math.round(performance.now() - perfStart),
+                })
             } else {
                 const content = await page.getTextContent()
                 for (const item of content.items) {
@@ -444,6 +462,7 @@ export const makePDF = async file => {
     }))
     book.isExternal = uri => /^\w+:/i.test(uri)
     book.resolveHref = async href => {
+        if (tocIndexByHref.has(href)) return { index: tocIndexByHref.get(href) }
         const parsed = JSON.parse(href)
         const dest = typeof parsed === 'string'
             ? await pdf.getDestination(parsed) : parsed
@@ -452,6 +471,7 @@ export const makePDF = async file => {
     }
     book.splitTOCHref = async href => {
         if (!href) return [null, null]
+        if (tocIndexByHref.has(href)) return [tocIndexByHref.get(href), null]
         const parsed = JSON.parse(href)
         const dest = typeof parsed === 'string'
             ? await pdf.getDestination(parsed) : parsed

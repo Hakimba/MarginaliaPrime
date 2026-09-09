@@ -208,12 +208,25 @@ function findSectionIndex(bookDoc: BookDoc, sectionId: string | number | null): 
  * Uses `createDocument()` to load section DOMs independently of the renderer,
  * resolves chapter boundaries from the TOC, and converts to structured text.
  */
+export interface ChapterExtractionOptions {
+  /** Index of the section the reader is currently in; used to center the window. */
+  currentSectionIdx?: number;
+  /**
+   * Hard cap on the number of sections extracted. A top-level TOC entry can span
+   * hundreds of PDF pages (a "Part"); extracting them all costs seconds on the
+   * main thread and floods the model context. Default 40.
+   */
+  maxSections?: number;
+}
+
 export async function extractChapterText(
   bookDoc: BookDoc,
   tocItem: TOCItem | undefined | null,
   toc: TOCItem[] | undefined,
+  options: ChapterExtractionOptions = {},
 ): Promise<string> {
   if (!tocItem?.href || !toc || !bookDoc.sections?.length) return '';
+  const maxSections = Math.max(1, options.maxSections ?? 40);
 
   try {
     // Always extract the full top-level chapter, even if we're in a subsection
@@ -245,7 +258,19 @@ export async function extractChapterText(
       lastSectionIdx = endSectionIdx - 1;
     }
 
-    for (let i = startSectionIdx; i <= lastSectionIdx; i++) {
+    // Cap the span: keep a window of at most `maxSections` sections around the
+    // reader's current section (or from the chapter start when unknown).
+    let firstIdx = startSectionIdx;
+    if (lastSectionIdx - startSectionIdx + 1 > maxSections) {
+      const cur = options.currentSectionIdx;
+      if (cur != null && cur >= startSectionIdx && cur <= lastSectionIdx) {
+        const half = Math.floor(maxSections / 2);
+        firstIdx = Math.max(startSectionIdx, Math.min(cur - half, lastSectionIdx - maxSections + 1));
+      }
+      lastSectionIdx = Math.min(lastSectionIdx, firstIdx + maxSections - 1);
+    }
+
+    for (let i = firstIdx; i <= lastSectionIdx; i++) {
       const section = bookDoc.sections[i];
       if (!section?.createDocument) continue;
 

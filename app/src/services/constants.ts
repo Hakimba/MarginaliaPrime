@@ -22,7 +22,6 @@ import { getDefaultMaxBlockSize, getDefaultMaxInlineSize } from '@/utils/config'
 import { stubTranslation as _ } from '@/utils/misc';
 export const DATA_SUBDIR = 'Marginalia';
 export const LOCAL_BOOKS_SUBDIR = `${DATA_SUBDIR}/Books`;
-export const CLOUD_BOOKS_SUBDIR = `${DATA_SUBDIR}/Books`;
 export const LOCAL_FONTS_SUBDIR = `${DATA_SUBDIR}/Fonts`;
 export const LOCAL_IMAGES_SUBDIR = `${DATA_SUBDIR}/Images`;
 
@@ -45,10 +44,8 @@ export const BOOK_UNGROUPED_ID = '';
 
 
 export const DEFAULT_SYSTEM_SETTINGS: Partial<SystemSettings> = {
-  keepLogin: false,
-  autoUpload: true,
   alwaysOnTop: false,
-  openBookInNewWindow: true,
+  openBookInNewWindow: false,
   alwaysShowStatusBar: false,
   alwaysInForeground: false,
   screenWakeLock: false,
@@ -57,7 +54,6 @@ export const DEFAULT_SYSTEM_SETTINGS: Partial<SystemSettings> = {
   openLastBooks: false,
   lastOpenBooks: [],
   autoImportBooksOnOpen: false,
-  telemetryEnabled: true,
   libraryViewMode: 'grid',
   librarySortBy: LibrarySortByType.Updated,
   librarySortAscending: false,
@@ -596,7 +592,6 @@ export const CJK_FONTS_PATTENS = new RegExp(
 
 export const BOOK_IDS_SEPARATOR = '+';
 
-export const MARGINALIA_WEB_BASE_URL = '';
 export const MARGINALIA_NODE_BASE_URL = '';
 
 export const MAX_ZOOM_LEVEL = 500;

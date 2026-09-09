@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { perfSpan } from '@/utils/perf';
 
 import {
   BookContent,
@@ -33,7 +34,6 @@ interface ViewState {
   error: string | null;
   progress: BookProgress | null;
   ribbonVisible: boolean;
-  syncing: boolean;
   gridInsets: Insets | null;
   /* View settings for the view: 
     generally view settings have a hierarchy of global settings < book settings < view settings
@@ -50,7 +50,6 @@ interface ReaderStore {
   setHoveredBookKey: (key: string | null) => void;
   setBookmarkRibbonVisibility: (key: string, visible: boolean) => void;
   setIsLoading: (key: string, loading: boolean) => void;
-  setIsSyncing: (key: string, syncing: boolean) => void;
   setProgress: (
     key: string,
     location: string,
@@ -135,8 +134,6 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
           error: null,
           progress: null,
           ribbonVisible: false,
-
-          syncing: false,
           gridInsets: null,
           viewSettings: null,
         },
@@ -153,11 +150,15 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
       let bookDoc = bookData?.bookDoc;
       let file = bookData?.file;
       if (!bookDoc || !file || reload) {
+        const endLoad = perfSpan('book:load-content', { id });
         const content = (await appService.loadBookContent(book)) as BookContent;
         file = content.file;
+        endLoad({ bytes: file?.size });
 
+        const endParse = perfSpan('book:parse', { id });
         const doc = await new DocumentLoader(file).open();
         bookDoc = doc.book;
+        endParse({ sections: bookDoc.sections?.length, layout: bookDoc.rendition?.layout });
       }
       const config = await appService.loadBookConfig(book, settings);
       // Import annotations from third-party readers on first open
@@ -237,8 +238,6 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
             error: null,
             progress: null,
             ribbonVisible: false,
-  
-            syncing: false,
             gridInsets: null,
             viewSettings: { ...globalViewSettings, ...configViewSettings },
           },
@@ -260,8 +259,6 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
             error: 'Failed to load book.',
             progress: null,
             ribbonVisible: false,
-  
-            syncing: false,
             gridInsets: null,
             viewSettings: null,
           },
@@ -409,17 +406,6 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
         [key]: {
           ...state.viewStates[key]!,
           loading,
-        },
-      },
-    })),
-
-  setIsSyncing: (key: string, syncing: boolean) =>
-    set((state) => ({
-      viewStates: {
-        ...state.viewStates,
-        [key]: {
-          ...state.viewStates[key]!,
-          syncing,
         },
       },
     })),
