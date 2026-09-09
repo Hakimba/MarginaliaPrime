@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { perfSpan } from '@/utils/perf';
 
 import {
   BookContent,
@@ -153,11 +154,15 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
       let bookDoc = bookData?.bookDoc;
       let file = bookData?.file;
       if (!bookDoc || !file || reload) {
+        const endLoad = perfSpan('book:load-content', { id });
         const content = (await appService.loadBookContent(book)) as BookContent;
         file = content.file;
+        endLoad({ bytes: file?.size });
 
+        const endParse = perfSpan('book:parse', { id });
         const doc = await new DocumentLoader(file).open();
         bookDoc = doc.book;
+        endParse({ sections: bookDoc.sections?.length, layout: bookDoc.rendition?.layout });
       }
       const config = await appService.loadBookConfig(book, settings);
       // Import annotations from third-party readers on first open

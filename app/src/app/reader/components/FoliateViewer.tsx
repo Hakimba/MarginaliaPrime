@@ -60,6 +60,7 @@ import { isCJKLang } from '@/utils/lang';
 import { getLocale } from '@/utils/misc';
 import { isFontType } from '@/utils/font';
 import { extractChapterText, findTopLevelAncestor } from '@/services/chapterExtraction';
+import { perfMark, perfSpan } from '@/utils/perf';
 import Spinner from '@/components/Spinner';
 import ImageViewer from './ImageViewer';
 import TableViewer from './TableViewer';
@@ -100,6 +101,35 @@ const FoliateViewer: React.FC<{
   const [scrollMargins, setScrollMargins] = useState({ top: 0, bottom: 0 });
   const docLoaded = useRef(false);
   const lastChapterHref = useRef('');
+  const firstRelocate = useRef(true);
+  // Chapter text is extracted lazily: only when the chat panel is open. Until
+  // then we remember what to extract so opening the panel can trigger it.
+  const pendingChapter = useRef<{
+    tocItem: Parameters<typeof extractChapterText>[1];
+    toc: Parameters<typeof extractChapterText>[2];
+    bookTitle: string;
+    bookAuthor: string;
+    chapterTitle: string;
+    sectionIdx?: number;
+  } | null>(null);
+  const chatOpen = useChatStore((s) => s.isOpen);
+
+  const runChapterExtraction = () => {
+    const pending = pendingChapter.current;
+    if (!pending) return;
+    pendingChapter.current = null;
+    const { tocItem, toc, bookTitle, bookAuthor, chapterTitle, sectionIdx } = pending;
+    const endExtract = perfSpan('chapter:extract', { chapter: chapterTitle });
+    extractChapterText(bookDoc, tocItem, toc, { currentSectionIdx: sectionIdx }).then((text) => {
+      endExtract({ chars: text.length });
+      useChatStore.getState().updateBookContext(bookTitle, bookAuthor, chapterTitle, text);
+    });
+  };
+
+  useEffect(() => {
+    if (chatOpen) runChapterExtraction();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatOpen]);
 
   useAutoFocus<HTMLDivElement>({ ref: containerRef });
 
@@ -117,6 +147,10 @@ const FoliateViewer: React.FC<{
     const { current, next, total } = detail.location as PageInfo;
     const currentPage = atEnd && total > 0 ? total - 1 : current;
     const pageInfo = { current: currentPage, next, total };
+    if (firstRelocate.current) {
+      firstRelocate.current = false;
+      perfMark('book:first-relocate', { bookKey, page: currentPage, total });
+    }
     setProgress(
       bookKey,
       detail.cfi,
@@ -145,10 +179,21 @@ const FoliateViewer: React.FC<{
         lastChapterHref.current = chapterHref;
         // Update immediately with title (text arrives async)
         useChatStore.getState().updateBookContext(bookTitle, bookAuthor, chapterTitle, '');
-        // Extract full chapter text asynchronously via createDocument()
-        extractChapterText(bookDoc, detail.tocItem, toc).then((text) => {
-          useChatStore.getState().updateBookContext(bookTitle, bookAuthor, chapterTitle, text);
-        });
+        pendingChapter.current = {
+          tocItem: detail.tocItem,
+          toc,
+          bookTitle,
+          bookAuthor,
+          chapterTitle,
+          sectionIdx: (detail.section as PageInfo | undefined)?.current,
+        };
+        // Extract now only if the chat is open; otherwise defer until it opens.
+        if (useChatStore.getState().isOpen) runChapterExtraction();
+      } else if (pendingChapter.current) {
+        // Same chapter, extraction still deferred: keep the window centered on the reader
+        pendingChapter.current.sectionIdx = (detail.section as PageInfo | undefined)?.current;
+        pendingChapter.current.chapterTitle = chapterTitle;
+        if (useChatStore.getState().isOpen) runChapterExtraction();
       } else {
         // Same chapter — just update metadata
         const { currentChapterText } = useChatStore.getState();
@@ -482,7 +527,9 @@ const FoliateViewer: React.FC<{
         bookDoc.sections[0]!.pageSpread = viewSettings.keepCoverSpread ? '' : coverSide;
       }
 
+      const endViewOpen = perfSpan('book:view-open', { bookKey });
       await view.open(bookDoc);
+      endViewOpen({ sections: bookDoc.sections?.length, layout: bookDoc.rendition?.layout });
       // make sure we can listen renderer events after opening book
       viewRef.current = view;
       setFoliateView(bookKey, view);
@@ -555,8 +602,10 @@ const FoliateViewer: React.FC<{
         await view.goToFraction(0);
       }
       setViewInited(bookKey, true);
+      perfMark('book:view-inited', { bookKey });
     };
 
+    perfMark('book:open-start', { bookKey });
     openBook();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

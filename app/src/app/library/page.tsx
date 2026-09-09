@@ -17,6 +17,7 @@ import { eventDispatcher } from '@/utils/event';
 import { throttle } from '@/utils/throttle';
 import { getDirPath, getFilename, joinPaths } from '@/utils/path';
 import { parseOpenWithFiles } from '@/helpers/openWith';
+import { perfMark, perfAutoOpen } from '@/utils/perf';
 import { isTauriAppPlatform, isWebAppPlatform } from '@/services/environment';
 
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -228,6 +229,7 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
     const library = await appService.loadLibraryBooks();
     setSettings(settings);
     setLibrary(library);
+    perfMark('library:refreshed', { books: library.length });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [envConfig, appService]);
 
@@ -363,6 +365,8 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
 
       setLibrary(library);
       setLibraryLoaded(true);
+      perfMark('library:ready', { books: library.length });
+      void perfAutoOpen((hash) => navigateToReader(router, [hash]));
       if (loadingTimeout) clearTimeout(loadingTimeout);
       setLoading(false);
     };

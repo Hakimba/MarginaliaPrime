@@ -1,4 +1,5 @@
 import { useRouter } from 'next/navigation';
+import { perfMark } from '@/utils/perf';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { isPWA, isWebAppPlatform } from '@/services/environment';
@@ -56,6 +57,7 @@ export const navigateToReader = (
   navOptions?: { scroll?: boolean },
 ) => {
   const ids = bookIds.join(BOOK_IDS_SEPARATOR);
+  perfMark('nav:reader', { ids });
   if (isWebAppPlatform() && !isPWA()) {
     router.push(`/reader/${ids}${queryParams ? `?${queryParams}` : ''}`, navOptions);
   } else {
