@@ -7,6 +7,7 @@ use tauri_plugin_fs::FsExt;
 use tauri::Url;
 
 mod dir_scanner;
+mod engine;
 
 use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
 
@@ -89,19 +90,6 @@ fn get_environment_variable(name: &str) -> String {
 }
 
 #[tauri::command]
-fn read_keychain_item(service: String) -> Result<String, String> {
-    let output = std::process::Command::new("security")
-        .args(["find-generic-password", "-s", &service, "-w"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err("Item not found".to_string())
-    }
-}
-
-#[tauri::command]
 fn read_file_contents(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
@@ -132,12 +120,16 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_process::init())
+        .manage(engine::EngineState::default())
         .invoke_handler(tauri::generate_handler![
             get_environment_variable,
             get_executable_dir,
-            read_keychain_item,
             read_file_contents,
             dir_scanner::read_dir,
+            engine::engine_binary_info,
+            engine::engine_start,
+            engine::engine_send,
+            engine::engine_stop,
         ])
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
@@ -207,21 +199,24 @@ pub fn run() {
                     if ({is_appimage}) window.__MARGINALIA_IS_APPIMAGE = true;
                     window.OPEN_WITH_FILES = {open_with_files};
                     (function () {{
-                        var report = function (msg) {{
+                        // 3 = info, 4 = warn, 5 = error in tauri-plugin-log.
+                        var report = function (msg, level) {{
                             try {{
                                 window.__TAURI_INTERNALS__.invoke('plugin:log|log', {{
-                                    level: 5, message: '[js] ' + msg, location: 'webview'
+                                    level: level || 5, message: '[js] ' + msg, location: 'webview'
                                 }});
                             }} catch (_) {{}}
                         }};
+                        var levelOf = {{ info: 3, warn: 4, error: 5 }};
                         window.addEventListener('error', function (e) {{
-                            report((e.message || 'error') + ' @ ' + (e.filename || '?') + ':' + (e.lineno || 0));
+                            var stack = e.error && e.error.stack ? ' | ' + e.error.stack : '';
+                            report((e.message || 'error') + ' @ ' + (e.filename || '?') + ':' + (e.lineno || 0) + stack);
                         }});
                         window.addEventListener('unhandledrejection', function (e) {{
                             var r = e.reason;
                             report('unhandled rejection: ' + (r && (r.stack || r.message) || String(r)));
                         }});
-                        ['warn', 'error'].forEach(function (level) {{
+                        ['warn', 'error', 'info'].forEach(function (level) {{
                             var orig = console[level].bind(console);
                             console[level] = function () {{
                                 var parts = [];
@@ -229,7 +224,11 @@ pub fn run() {
                                     var a = arguments[i];
                                     parts.push(a && a.stack ? a.stack : (typeof a === 'object' ? JSON.stringify(a) : String(a)));
                                 }}
-                                report('console.' + level + ': ' + parts.join(' ').slice(0, 2000));
+                                var text = parts.join(' ');
+                                // Perf marks log themselves already; don't duplicate them.
+                                if (text.indexOf('[perf]') !== 0) {{
+                                    report('console.' + level + ': ' + text.slice(0, 2000), levelOf[level]);
+                                }}
                                 orig.apply(console, arguments);
                             }};
                         }});

@@ -32,9 +32,6 @@
     "setup-vendors": "pnpm setup-pdfjs"
   },
   "dependencies": {
-    "@mariozechner/pi-agent-core": "^0.61.1",
-    "@mariozechner/pi-ai": "^0.61.1",
-    "@sinclair/typebox": "^0.34.0",
     "@tauri-apps/api": "2.10.1",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.4.5",

@@ -1,30 +1,37 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-interface ChatContext {
-  selectedText: string;
-  surroundingText: string;
-  chapterTitle: string;
-  chapterText: string;
-  bookTitle: string;
-  bookAuthor: string;
-}
+import { DEFAULT_BACKEND_ID, DEFAULT_MODEL_ID } from '@/services/engine';
+import type { EngineSelection } from '@/services/engine';
 
 interface ChatState {
   isOpen: boolean;
   isPinned: boolean;
   panelWidth: number;
-  pendingContext: ChatContext | null;
+  /**
+   * Selections waiting to be sent. A list from the start: composing several
+   * passages into one question is the point of the next task, and the engine
+   * already accepts them.
+   */
+  pendingSelections: EngineSelection[];
 
   bookTitle: string;
   bookAuthor: string;
   bookHash: string;
   currentChapter: string;
   currentChapterText: string;
+  /** Reading position label, e.g. "p. 30 / 417". */
+  position: string;
+  /**
+   * Bumped when the chat needs the chapter text now rather than when the
+   * reader next goes idle. The viewer owns the extraction and watches this.
+   */
+  chapterRequest: number;
 
   conversationId: string;
 
-  provider: string;
+  /** Model backend, e.g. 'claude'. A second one is planned for Codex. */
+  backendId: string;
   modelId: string;
   webSearchEnabled: boolean;
 
@@ -32,11 +39,15 @@ interface ChatState {
   setOpen: (open: boolean) => void;
   setPinned: (pinned: boolean) => void;
   setPanelWidth: (width: number) => void;
-  setPendingContext: (ctx: ChatContext | null) => void;
+  addSelection: (selection: EngineSelection) => void;
+  removeSelection: (index: number) => void;
+  clearSelections: () => void;
   updateBookContext: (title: string, author: string, chapter: string, chapterText: string) => void;
+  setPosition: (position: string) => void;
+  requestChapter: () => void;
   setBookHash: (hash: string) => void;
   setConversationId: (id: string) => void;
-  setModel: (provider: string, modelId: string) => void;
+  setModel: (backendId: string, modelId: string) => void;
   setWebSearchEnabled: (enabled: boolean) => void;
 }
 
@@ -50,30 +61,43 @@ export const useChatStore = create<ChatState>()(
       isOpen: false,
       isPinned: false,
       panelWidth: 380,
-      pendingContext: null,
+      pendingSelections: [],
 
       bookTitle: '',
       bookAuthor: '',
       bookHash: '',
       currentChapter: '',
       currentChapterText: '',
+      position: '',
+      chapterRequest: 0,
 
       conversationId: generateId(),
 
-      provider: 'anthropic',
-      modelId: 'claude-opus-4-6',
+      backendId: DEFAULT_BACKEND_ID,
+      modelId: DEFAULT_MODEL_ID,
       webSearchEnabled: false,
 
       togglePanel: () => set((s) => ({ isOpen: !s.isOpen })),
       setOpen: (open) => set({ isOpen: open }),
       setPinned: (pinned) => set({ isPinned: pinned }),
       setPanelWidth: (width) => set({ panelWidth: width }),
-      setPendingContext: (ctx) => set({ pendingContext: ctx }),
+      addSelection: (selection) =>
+        set((s) => ({ pendingSelections: [...s.pendingSelections, selection] })),
+      removeSelection: (index) =>
+        set((s) => ({ pendingSelections: s.pendingSelections.filter((_, i) => i !== index) })),
+      clearSelections: () => set({ pendingSelections: [] }),
       updateBookContext: (title, author, chapter, chapterText) =>
-        set({ bookTitle: title, bookAuthor: author, currentChapter: chapter, currentChapterText: chapterText }),
+        set({
+          bookTitle: title,
+          bookAuthor: author,
+          currentChapter: chapter,
+          currentChapterText: chapterText,
+        }),
+      setPosition: (position) => set({ position }),
+      requestChapter: () => set((s) => ({ chapterRequest: s.chapterRequest + 1 })),
       setBookHash: (hash) => set({ bookHash: hash }),
       setConversationId: (id) => set({ conversationId: id }),
-      setModel: (provider, modelId) => set({ provider, modelId }),
+      setModel: (backendId, modelId) => set({ backendId, modelId }),
       setWebSearchEnabled: (enabled) => set({ webSearchEnabled: enabled }),
     }),
     {
@@ -82,7 +106,7 @@ export const useChatStore = create<ChatState>()(
         isOpen: state.isOpen,
         isPinned: state.isPinned,
         panelWidth: state.panelWidth,
-        provider: state.provider,
+        backendId: state.backendId,
         modelId: state.modelId,
         webSearchEnabled: state.webSearchEnabled,
       }),

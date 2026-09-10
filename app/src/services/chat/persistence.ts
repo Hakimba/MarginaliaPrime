@@ -28,6 +28,12 @@ interface ConversationMeta {
   createdAt: number;
   lastMessageAt: number;
   messageCount: number;
+  /**
+   * Session id of the CLI process that held this conversation. Stored so the
+   * engine can resume it with `--resume` after the app restarts; the CLI keeps
+   * the history, we only keep the handle.
+   */
+  engineSessionId?: string;
 }
 
 const CHATS_DIR = 'chats';
