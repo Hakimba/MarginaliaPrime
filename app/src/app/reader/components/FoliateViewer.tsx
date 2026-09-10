@@ -114,22 +114,52 @@ const FoliateViewer: React.FC<{
   } | null>(null);
   const chatOpen = useChatStore((s) => s.isOpen);
 
+  /**
+   * Extracting a chapter walks every section of it, which is heavy enough to
+   * delay the first page render. Run it when the reader goes idle so an open
+   * chat panel never costs anything at book-opening time.
+   */
   const runChapterExtraction = () => {
+    if (!pendingChapter.current) return;
+    const idle = (window as unknown as { requestIdleCallback?: typeof setTimeout })
+      .requestIdleCallback;
+    if (typeof idle === 'function') {
+      (window as unknown as { requestIdleCallback: (cb: () => void, o?: unknown) => void })
+        .requestIdleCallback(() => extractPendingChapter(), { timeout: 3000 });
+    } else {
+      setTimeout(() => extractPendingChapter(), 500);
+    }
+  };
+
+  const extractPendingChapter = () => {
     const pending = pendingChapter.current;
     if (!pending) return;
     pendingChapter.current = null;
     const { tocItem, toc, bookTitle, bookAuthor, chapterTitle, sectionIdx } = pending;
     const endExtract = perfSpan('chapter:extract', { chapter: chapterTitle });
-    extractChapterText(bookDoc, tocItem, toc, { currentSectionIdx: sectionIdx }).then((text) => {
+    // PDF: a page window around the reader. EPUB: the TOC chapter.
+    const pageWindow = bookDoc.rendition?.layout === 'pre-paginated' ? 6 : undefined;
+    extractChapterText(bookDoc, tocItem, toc, {
+      currentSectionIdx: sectionIdx,
+      ...(pageWindow ? { pageWindow } : {}),
+    }).then((text) => {
       endExtract({ chars: text.length });
       useChatStore.getState().updateBookContext(bookTitle, bookAuthor, chapterTitle, text);
     });
   };
 
+  const chapterRequest = useChatStore((s) => s.chapterRequest);
+
   useEffect(() => {
     if (chatOpen) runChapterExtraction();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatOpen]);
+
+  // The chat is about to send a question and needs the chapter now.
+  useEffect(() => {
+    if (chapterRequest > 0) extractPendingChapter();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chapterRequest]);
 
   useAutoFocus<HTMLDivElement>({ ref: containerRef });
 
@@ -167,6 +197,16 @@ const FoliateViewer: React.FC<{
       const chapterTitle = detail.tocItem?.label || '';
       const bookTitle = bookData?.book?.title || '';
       const bookAuthor = bookData?.book?.author || '';
+
+      // Reading position, sent to the model with every question.
+      const isFixed = bookDoc.rendition?.layout === 'pre-paginated';
+      useChatStore
+        .getState()
+        .setPosition(
+          pageInfo.total > 0
+            ? `${isFixed ? 'p.' : 'page'} ${currentPage + 1} / ${pageInfo.total}`
+            : '',
+        );
 
       // Resolve to top-level chapter so we cache at chapter granularity,
       // not subsection — navigating between 5.1 and 5.2 won't re-extract

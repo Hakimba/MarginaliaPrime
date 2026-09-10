@@ -43,6 +43,19 @@ const BLOCK_ELEMENTS = new Set([
   'HR', 'BR',
 ]);
 
+/**
+ * Math containers produced by the usual LaTeX-to-EPUB toolchains. Their text is
+ * wrapped in LaTeX delimiters and padded with spaces: books generated this way
+ * often have no whitespace between a formula and the surrounding words, which
+ * would otherwise yield "isΩ = ωω" glued to the previous sentence.
+ */
+const MATH_SELECTOR = 'math, mjx-container, .MathJax, .math, .texhtml, .mathjax';
+const DISPLAY_MATH_HINT = /\b(display|equation|eqn|numberedeq)\b/i;
+
+/** A footnote or endnote reference: rendered as [n] instead of glued digits. */
+const NOTE_REF_SELECTOR =
+  'a[role="doc-noteref"], a.footnote-ref, a.noteref, sup > a[href^="#"], a[epub\\:type="noteref"]';
+
 const HEADING_LEVELS: Record<string, string> = {
   H1: '# ',
   H2: '## ',
@@ -52,11 +65,21 @@ const HEADING_LEVELS: Record<string, string> = {
   H6: '###### ',
 };
 
+/** `Element.matches` is missing on some nodes of a detached document. */
+function matches(el: Element, selector: string): boolean {
+  try {
+    return typeof el.matches === 'function' && el.matches(selector);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Convert a DOM subtree to structured plain text suitable for LLM context.
- * Preserves headings, paragraphs, list items, and blockquotes as markdown-like formatting.
+ * Preserves headings, paragraphs, list items and blockquotes as markdown-like
+ * formatting, formulas as LaTeX, and footnote references as [n].
  */
-function domToStructuredText(node: Node): string {
+export function domToStructuredText(node: Node): string {
   const parts: string[] = [];
 
   function walk(n: Node) {
@@ -75,6 +98,24 @@ function domToStructuredText(node: Node): string {
 
     // Skip hidden elements, scripts, styles
     if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return;
+
+    // Footnote reference: keep it readable and out of the sentence.
+    if (matches(el, NOTE_REF_SELECTOR)) {
+      const label = el.textContent?.trim();
+      parts.push(label ? ` [${label}] ` : ' ');
+      return;
+    }
+
+    // Math: emit LaTeX delimiters and stop descending.
+    if (matches(el, MATH_SELECTOR)) {
+      const formula = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+      if (formula) {
+        const display =
+          el.getAttribute('display') === 'block' || DISPLAY_MATH_HINT.test(el.className || '');
+        parts.push(display ? `\n\n$$${formula}$$\n\n` : ` $${formula}$ `);
+      }
+      return;
+    }
 
     const isBlock = BLOCK_ELEMENTS.has(tag);
 
@@ -177,6 +218,24 @@ function extractRangeText(doc: Document, startId: string | null, endId: string |
   return domToStructuredText(wrapper);
 }
 
+/** Concatenate the structured text of a range of sections, inclusive. */
+async function collectSections(bookDoc: BookDoc, first: number, last: number): Promise<string> {
+  const parts: string[] = [];
+  for (let i = first; i <= last; i += 1) {
+    const section = bookDoc.sections[i];
+    if (!section?.createDocument) continue;
+    try {
+      const doc = await section.createDocument();
+      if (!doc) continue;
+      const text = domToStructuredText(doc.body ?? doc.documentElement);
+      if (text) parts.push(text);
+    } catch {
+      // A page that fails to load is skipped rather than losing the window.
+    }
+  }
+  return parts.join('\n\n');
+}
+
 /**
  * Resolve a TOC href into a section index and optional fragment ID.
  * Handles the async case (PDF) transparently.
@@ -217,6 +276,13 @@ export interface ChapterExtractionOptions {
    * main thread and floods the model context. Default 40.
    */
   maxSections?: number;
+  /**
+   * For a fixed-layout book (PDF), one section is one page and the table of
+   * contents is unreliable as a boundary: a top-level entry is often a whole
+   * "Part". Take this many pages on each side of the reader instead, which is
+   * both cheaper and closer to what the question is about.
+   */
+  pageWindow?: number;
 }
 
 export async function extractChapterText(
@@ -225,8 +291,19 @@ export async function extractChapterText(
   toc: TOCItem[] | undefined,
   options: ChapterExtractionOptions = {},
 ): Promise<string> {
-  if (!tocItem?.href || !toc || !bookDoc.sections?.length) return '';
+  if (!bookDoc.sections?.length) return '';
   const maxSections = Math.max(1, options.maxSections ?? 40);
+
+  // Fixed layout: a window of pages around the reader, no TOC involved.
+  if (options.pageWindow && options.currentSectionIdx != null) {
+    const half = Math.max(1, options.pageWindow);
+    const cur = options.currentSectionIdx;
+    const first = Math.max(0, cur - half);
+    const last = Math.min(bookDoc.sections.length - 1, cur + half);
+    return collectSections(bookDoc, first, last);
+  }
+
+  if (!tocItem?.href || !toc) return '';
 
   try {
     // Always extract the full top-level chapter, even if we're in a subsection

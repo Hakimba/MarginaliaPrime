@@ -624,10 +624,7 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     if (!selection || !selection.text) return;
     setShowAnnotPopup(false);
 
-    const { book } = bookData;
     const progress = getProgress(bookKey);
-
-    // Get current chapter title from progress
     const chapterTitle = progress?.sectionLabel || '';
 
     // Get surrounding text from the selection's section
@@ -660,13 +657,12 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
       // Surrounding text extraction is best-effort
     }
 
-    useChatStore.getState().setPendingContext({
-      selectedText: selection.text,
+    // The chapter text and the book metadata live in the store already; a
+    // selection only carries what is specific to this passage.
+    useChatStore.getState().addSelection({
+      text: selection.text,
       surroundingText,
-      chapterTitle,
-      chapterText: '', // Full chapter text injected via system prompt
-      bookTitle: book?.title || '',
-      bookAuthor: book?.author || '',
+      location: chapterTitle,
     });
     useChatStore.getState().setOpen(true);
   };
