@@ -1,10 +1,28 @@
 const pdfjsPath = path => `/vendor/pdfjs/${path}`
 
+import { applyReadingOrder, clampSelectionToZone, orderItems, lineToText, groupMarginNotes }
+    from './pdf-text-order.js'
+import { installGeometrySelection } from './pdf-selection.js'
+
 import '@pdfjs/pdf.min.mjs'
 const pdfjsLib = globalThis.pdfjsLib
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsPath('pdf.worker.min.mjs')
 
 const fetchText = async url => await (await fetch(url)).text()
+
+// WebKit has no async iteration on ReadableStream, so `page.getTextContent()`
+// throws there ("undefined is not a function"): the stream has to be drained
+// through a reader.
+const readTextItems = async page => {
+    const reader = page.streamTextContent().getReader()
+    const items = []
+    for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (value?.items) items.push(...value.items)
+    }
+    return items
+}
 
 let textLayerBuilderCSS = null
 let annotationLayerBuilderCSS = null
@@ -54,6 +72,8 @@ const setupPanningEvents = (doc) => {
     }
 
     container.onpointerdown = (e) => {
+        // The geometry-driven selection gets first refusal on a press.
+        if (doc._marginaliaSelection?.isGrabbing()) return
         const selection = doc.getSelection()
         const hasTextSelection = selection && selection.toString().length > 0
 
@@ -77,7 +97,6 @@ const setupPanningEvents = (doc) => {
                     scrollLeft = scrollParent.scrollLeft
                     scrollTop = scrollParent.scrollTop
                 }
-                container.style.cursor = 'grabbing'
             }
         } else {
             container.classList.add('selecting')
@@ -104,7 +123,6 @@ const setupPanningEvents = (doc) => {
         if (isPanning) {
             isPanning = false
             scrollParent = null
-            container.style.cursor = 'grab'
         } else {
             container.classList.remove('selecting')
         }
@@ -114,20 +132,12 @@ const setupPanningEvents = (doc) => {
         if (isPanning) {
             isPanning = false
             scrollParent = null
-            container.style.cursor = 'grab'
         }
     }
 
-    doc.addEventListener('selectionchange', () => {
-        const selection = doc.getSelection()
-        if (selection && selection.toString().length > 0) {
-            container.style.cursor = 'text'
-        } else if (!isPanning) {
-            container.style.cursor = 'grab'
-        }
-    })
-
-    container.style.cursor = 'grab'
+    // The cursor is left alone: a hand that came and went over the page told
+    // the reader nothing, since a click turns the page rather than grabbing it.
+    doc.addEventListener('selectionchange', () => clampSelectionToZone(doc))
 }
 
 const render = async (page, doc, zoom) => {
@@ -210,6 +220,16 @@ const render = async (page, doc, zoom) => {
     // Bail out if superseded after async text layer render
     if (renderGenerations.get(doc) !== generation) return
 
+    // A PDF stores text in the producer's order, not the reader's: marginal
+    // notes are interleaved with the body and glyphs jump around formulas.
+    // Selection follows the DOM, so it is re-ordered to follow the eye.  A
+    // layout heuristic must never cost the page itself, hence the guard.
+    try {
+        applyReadingOrder(container)
+    } catch (e) {
+        console.error('pdf: reading order failed', e)
+    }
+
     globalThis.__perfMark?.('pdf:render', {
         page: page.pageNumber, scale: Math.round(scale * 100) / 100,
         dur: Math.round(performance.now() - perfStart),
@@ -235,6 +255,14 @@ const render = async (page, doc, zoom) => {
 
     // Set up panning/selection event handlers once per document
     setupPanningEvents(doc)
+
+    // The page's own geometry now decides what a drag selects, not the
+    // browser's hit-testing.
+    try {
+        doc._marginaliaSelection = installGeometrySelection(doc, container)
+    } catch (e) {
+        console.error('pdf: geometry selection unavailable', e)
+    }
 
     // Clear annotation layer before re-rendering to prevent DOM accumulation
     const div = doc.querySelector('.annotationLayer')
@@ -284,6 +312,9 @@ const renderPage = async (page, getImageBlob) => {
         }
         ${textLayerBuilderCSS}
         ${annotationLayerBuilderCSS}
+        /* pdf.js asks for a text cursor on every word; one plain pointer over
+           the whole page is what the reader wants to see. */
+        .textLayer, .textLayer :is(span, br) { cursor: default; }
         </style>
         <div id="canvas"></div>
         <div class="textLayer"></div>
@@ -291,6 +322,7 @@ const renderPage = async (page, getImageBlob) => {
     `
     const src = URL.createObjectURL(new Blob([data], { type: 'text/html' }))
     const onZoom = ({ doc, scale }) => render(page, doc, scale)
+    globalThis.__perfMark?.('pdf:page-html', { page: page.pageNumber })
     return { src, data, onZoom }
 }
 
@@ -420,6 +452,7 @@ export const makePDF = async file => {
         createDocument: async () => {
             const page = await getPage(i)
             const doc = document.implementation.createHTMLDocument('')
+            const perfStart = performance.now()
 
             const canvas = doc.createElement('div')
             canvas.id = 'canvas'
@@ -429,33 +462,73 @@ export const makePDF = async file => {
             textLayer.className = 'textLayer'
             doc.body.appendChild(textLayer)
 
+            // Built straight from the text items rather than from pdf.js's
+            // TextLayer: the geometry is exact, no canvas font metrics are
+            // needed (they cost seconds over a window of pages), and the text
+            // comes out in reading order, one block per visual line, with the
+            // spaces a producer only expresses as gaps between words.
+            const viewport = page.getViewport({ scale: 1 })
+            const items = (await readTextItems(page))
+                .filter(item => typeof item.str === 'string')
+                .map(item => ({
+                    x: item.transform[4],
+                    y: viewport.height - item.transform[5],
+                    w: item.width,
+                    h: item.height,
+                    // An axis label set on its side: a sure sign of a graphic.
+                    rot: Math.round(
+                        Math.atan2(item.transform[1], item.transform[0]) * 180 / Math.PI),
+                    str: item.str,
+                }))
+            let ordered = null
+            try {
+                ordered = orderItems(items, viewport.width)
+            } catch (e) {
+                console.error('pdf: reading order failed on page', page.pageNumber, e)
+            }
+
+            if (ordered) {
+                const { lines, textHeight } = ordered
+                const body = doc.createElement('div')
+                body.className = 'pdfPage'
+                for (const line of lines) {
+                    if (line.zone !== 'body') continue
+                    const text = lineToText(line, textHeight)
+                    if (!text) continue
+                    if (body.firstChild) body.appendChild(doc.createElement('br'))
+                    body.appendChild(doc.createTextNode(text))
+                }
+                if (body.firstChild) textLayer.appendChild(body)
+                // What is not text to read follows, tagged: the lettering of
+                // the graphics, then the marginal notes.
+                for (const zone of ['figure', 'margin']) {
+                    for (const note of groupMarginNotes(lines, textHeight, zone)) {
+                        const text = note.lines.map(line => lineToText(line, textHeight))
+                            .filter(Boolean).join(' ').trim()
+                        if (!text) continue
+                        const div = doc.createElement('div')
+                        div.className = zone === 'margin' ? 'pdfMarginNote' : 'pdfFigureText'
+                        div.dataset.zone = zone
+                        div.textContent = text
+                        textLayer.appendChild(div)
+                    }
+                }
+            } else {
+                for (const item of items) {
+                    if (!item.str) continue
+                    const span = doc.createElement('span')
+                    span.textContent = item.str
+                    textLayer.appendChild(span)
+                }
+            }
+
             const annotationLayer = doc.createElement('div')
             annotationLayer.className = 'annotationLayer'
             doc.body.appendChild(annotationLayer)
 
-            // TextLayer requires canvas 2d context for font metrics;
-            // fall back to manual span construction when unavailable
-            const probe = doc.createElement('canvas')
-            if (probe.getContext?.('2d')) {
-                const perfStart = performance.now()
-                const textLayerInstance = new pdfjsLib.TextLayer({
-                    textContentSource: await page.streamTextContent(),
-                    container: textLayer, viewport: page.getViewport({ scale: 1 }),
-                })
-                await textLayerInstance.render()
-                globalThis.__perfMark?.('pdf:create-doc', {
-                    page: page.pageNumber, dur: Math.round(performance.now() - perfStart),
-                })
-            } else {
-                const content = await page.getTextContent()
-                for (const item of content.items) {
-                    if (item.str) {
-                        const span = doc.createElement('span')
-                        span.textContent = item.str
-                        textLayer.appendChild(span)
-                    }
-                }
-            }
+            globalThis.__perfMark?.('pdf:create-doc', {
+                page: page.pageNumber, dur: Math.round(performance.now() - perfStart),
+            })
             return doc
         },
         size: 1000,

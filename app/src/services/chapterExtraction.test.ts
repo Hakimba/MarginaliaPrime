@@ -60,3 +60,19 @@ describe('domToStructuredText', () => {
     expect(text('<div><div><p>  a   b  </p></div></div>')).toBe('a b');
   });
 });
+
+describe('marginal notes of a PDF page', () => {
+  it('announces them instead of dropping them into the sentence', () => {
+    const doc = new DOMParser().parseFromString(
+      `<div class="textLayer">
+         <div class="pdfPage">Let matrix B have the property that AB = I.<br>The inverse is unique.</div>
+         <div class="pdfMarginNote" data-zone="margin">A square matrix has as many columns as rows.</div>
+       </div>`,
+      'text/html',
+    );
+    const text = domToStructuredText(doc.body);
+    expect(text).toContain('Let matrix B have the property that AB = I.\nThe inverse is unique.');
+    expect(text).toContain('[note de marge] A square matrix has as many columns as rows.');
+    expect(text).not.toContain('I.A square matrix');
+  });
+});

@@ -29,6 +29,7 @@ export const useTextSelector = (
   const isTouchStarted = useRef(false);
   const selectionPosition = useRef<number | null>(null);
   const lastPointerType = useRef<string>('mouse');
+  const pressPoint = useRef<{ x: number; y: number } | null>(null);
   const isInstantAnnotating = useRef(false);
   const isInstantAnnotated = useRef(false);
 
@@ -50,8 +51,17 @@ export const useTextSelector = (
     return sel && sel.toString().trim().length > 0 && sel.rangeCount > 0;
   };
 
-  const makeSelection = async (sel: Selection, index: number, rebuildRange = false) => {
+  const makeSelection = async (
+    sel: Selection,
+    index: number,
+    rebuildRange = false,
+    quiet = false,
+  ) => {
     isTextSelected.current = true;
+    // The passage is taken exactly as it was dragged, half a word included:
+    // rounding it out to whole words took away what the reader had aimed at.
+    // Whole words and whole lines have their own gestures, double and triple
+    // click.
     const range = sel.getRangeAt(0);
     if (rebuildRange) {
       sel.removeAllRanges();
@@ -65,6 +75,7 @@ export const useTextSelector = (
       page: bookData?.isFixedLayout ? index + 1 : progress?.page || 0,
       range,
       index,
+      quiet,
     });
   };
   // FIXME: extremely hacky way to dismiss system selection tools on iOS
@@ -105,6 +116,7 @@ export const useTextSelector = (
 
   const handlePointerDown = (doc: Document, index: number, ev: PointerEvent) => {
     lastPointerType.current = ev.pointerType;
+    pressPoint.current = { x: ev.clientX, y: ev.clientY };
 
     if (isInstantAnnotationEnabled()) {
       const handled = handleInstantAnnotationPointerDown(doc, index, ev);
@@ -155,6 +167,7 @@ export const useTextSelector = (
     // Available on iOS and Desktop, fired at touchend or mouseup
     // Note that on Android, we mock pointer events with native touch events
     const sel = doc.getSelection() as Selection;
+
     if (isValidSelection(sel)) {
       const isPointerInside = ev && isPointerInsideSelection(sel, ev);
       const isIOS = osPlatform === 'ios' || appService?.isIOSApp;
@@ -163,7 +176,17 @@ export const useTextSelector = (
         makeSelectionOnIOS(sel, index);
       } else if (isPointerInside) {
         isUpToPopup.current = true;
-        makeSelection(sel, index, true);
+        // The toolbar belongs to a deliberate click on a passage. A drag only
+        // records the selection: it stays highlighted, ctrl+shift+c still sends
+        // it to the chat, and nothing jumps in front of the text being read.
+        // Moving means dragging, and a drag only records the passage; the
+        // bubble belongs to a press that stayed put, on a passage.
+        const start = pressPoint.current;
+        const moved =
+          !start || !ev
+            ? true
+            : Math.abs(ev.clientX - start.x) + Math.abs(ev.clientY - start.y) > 4;
+        makeSelection(sel, index, true, moved);
       } else if (appService?.isAndroidApp) {
         isUpToPopup.current = false;
       }

@@ -32,6 +32,12 @@ export interface TextSelection {
   href?: string;
   annotated?: boolean;
   rect?: Rect;
+  /**
+   * A selection that was just dragged: recorded, highlighted, but without the
+   * annotation toolbar. The toolbar is for a deliberate click on the passage,
+   * not for every drag of the mouse.
+   */
+  quiet?: boolean;
 }
 
 const frameRect = (frame: Frame, rect?: Rect, sx = 1, sy = 1) => {
@@ -73,6 +79,29 @@ const constrainPointWithinRect = (point: Point, rect: Rect, padding: number) => 
     x: Math.max(padding, Math.min(point.x, rect.right - rect.left - padding)),
     y: Math.max(padding, Math.min(point.y, rect.bottom - rect.top - padding)),
   };
+};
+
+/**
+ * Whether a point lands on a range, to the pixel.
+ *
+ * `isPointerInsideSelection` below allows fifty pixels around the passage,
+ * which is right for telling apart the end of a drag from an unrelated click,
+ * but far too loose to decide that the reader clicked *on* a passage.
+ */
+export const isPointerOnRange = (range: Range, x: number, y: number, padding = 2) => {
+  const rects = range.getClientRects();
+  for (let i = 0; i < rects.length; i++) {
+    const rect = rects[i]!;
+    if (
+      x >= rect.left - padding &&
+      x <= rect.right + padding &&
+      y >= rect.top - padding &&
+      y <= rect.bottom + padding
+    ) {
+      return true;
+    }
+  }
+  return false;
 };
 
 export const isPointerInsideSelection = (selection: Selection, ev: PointerEvent) => {
@@ -268,25 +297,102 @@ export const snapRangeToWords = (range: Range): void => {
   snapEndToWordBoundary();
 };
 
+/** Elements whose boundary is a line break in the text a range yields. */
+const TEXT_BLOCK_TAGS = new Set([
+  'P', 'DIV', 'SECTION', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'PRE', 'FIGURE', 'FIGCAPTION',
+  'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+  'UL', 'OL', 'LI', 'DL', 'DT', 'DD', 'TABLE', 'TR', 'TH', 'TD', 'HR',
+]);
+
+/**
+ * Text of a range, with the line breaks its markup implies.
+ *
+ * Walking text nodes alone glues the last word of a line to the first of the
+ * next one — "dimensionsdo not match" on a PDF page, "done.17The" across two
+ * paragraphs of an EPUB.
+ */
 export const getTextFromRange = (range: Range, rejectTags: string[] = []): string => {
   const clonedRange = range.cloneRange();
   const fragment = clonedRange.cloneContents();
-  const walker = document.createTreeWalker(fragment, NodeFilter.SHOW_TEXT, {
-    acceptNode: (node) => {
-      const parent = node.parentElement;
-      if (rejectTags.includes(parent?.tagName.toLowerCase() || '')) {
-        return NodeFilter.FILTER_REJECT;
-      }
-      return NodeFilter.FILTER_ACCEPT;
+  const walker = document.createTreeWalker(
+    fragment,
+    NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+    {
+      acceptNode: (node) => {
+        const tag =
+          node.nodeType === Node.ELEMENT_NODE
+            ? (node as Element).tagName.toLowerCase()
+            : node.parentElement?.tagName.toLowerCase();
+        if (tag && rejectTags.includes(tag)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
     },
-  });
+  );
 
   let text = '';
-  let node: Text | null;
+  let node: Node | null;
 
-  while ((node = walker.nextNode() as Text | null)) {
+  while ((node = walker.nextNode())) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node as Element;
+      if ((el.tagName === 'BR' || TEXT_BLOCK_TAGS.has(el.tagName)) && text && !text.endsWith('\n')) {
+        text += '\n';
+      } else if (
+        // A word of a PDF page whose space lives in the geometry, not in the
+        // markup: the reading-order pass recorded it here.
+        el.getAttribute('data-space') === '1' &&
+        text &&
+        !/\s$/.test(text)
+      ) {
+        text += ' ';
+      }
+      continue;
+    }
     text += node.nodeValue ?? '';
   }
 
   return text;
+};
+
+/**
+ * A selected passage as the model should read it: no hyphen left over from a
+ * line break, no line break in the middle of a sentence.
+ */
+export const normalizeSelectedText = (text: string): string =>
+  text
+    .replace(/\u00ad/g, '')
+    .replace(/(\p{L})-\n\s*(\p{L})/gu, '$1$2')
+    .replace(/\s*\n\s*/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+
+/**
+ * The lines around a span of a PDF text layer.
+ *
+ * A page has no paragraphs: every word is a span, and a line ends at a `<br>`
+ * placed by the reading-order pass. Marginal notes are skipped unless the
+ * anchor itself is one, so the context of a passage stays the body text.
+ */
+export const collectPdfLinesAround = (el: Element, lineCount: number): string => {
+  const zoneOf = (node: Element | null) =>
+    node?.getAttribute?.('data-zone') === 'margin' ? 'margin' : 'body';
+  const zone = zoneOf(el);
+  const gather = (direction: 'previous' | 'next') => {
+    const parts: string[] = [];
+    let breaks = 0;
+    let node = direction === 'previous' ? el.previousElementSibling : el.nextElementSibling;
+    while (node) {
+      if (node.tagName === 'BR') {
+        breaks += 1;
+        // The break that closes the last wanted line ends the walk.
+        if (breaks > lineCount) break;
+        parts.push('\n');
+      } else if (zoneOf(node) === zone) {
+        parts.push(node.textContent ?? '');
+      }
+      node = direction === 'previous' ? node.previousElementSibling : node.nextElementSibling;
+    }
+    return direction === 'previous' ? parts.reverse().join('') : parts.join('');
+  };
+  return `${gather('previous')}${el.textContent ?? ''}${gather('next')}`;
 };
