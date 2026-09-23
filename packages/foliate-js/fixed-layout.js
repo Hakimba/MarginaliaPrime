@@ -59,6 +59,8 @@ export class FixedLayout extends HTMLElement {
     #overlayers = new Map()
     #preloadQueue = []
     #activePreloads = 0
+    #layoutGeneration = 0
+    #navigationId = 0
     // Scroll mode fields
     #scrollMode = false
     #scrollPages = []
@@ -132,8 +134,8 @@ export class FixedLayout extends HTMLElement {
                     this.#scrollMode = true
                     if (this.book) this.#initScrollMode(savedIndex)
                 } else if (value !== 'scrolled' && this.#scrollMode) {
-                    this.#destroyScrollMode()
                     this.#scrollMode = false
+                    this.#destroyScrollMode()
                     this.#render()
                 }
                 break
@@ -307,41 +309,35 @@ export class FixedLayout extends HTMLElement {
         }
         return renderPromises
     }
-    async #showSpread({ left, right, center, side, spreadIndex }) {
-        this.#left = null
-        this.#right = null
-        this.#center = null
-
+    async #showSpread({ left, right, center, spreadIndex, navigationId }) {
+        let frames
         const cacheKey = spreadIndex !== undefined ? `spread-${spreadIndex}` : null
         const prerendered = cacheKey ? this.#prerenderedSpreads.get(cacheKey) : null
 
         if (prerendered) {
             this.#spreadAccessTime.set(cacheKey, Date.now())
-            if (prerendered.center) {
-                this.#center = prerendered.center
-            } else {
-                this.#left = prerendered.left
-                this.#right = prerendered.right
-            }
+            frames = prerendered
         } else {
             if (center) {
-                this.#center = await this.#createFrame(center)
-                if (cacheKey) {
-                    this.#prerenderedSpreads.set(cacheKey, { center: this.#center })
-                    this.#spreadAccessTime.set(cacheKey, Date.now())
-                }
+                frames = { center: await this.#createFrame(center) }
             } else {
-                this.#left = await this.#createFrame(left)
-                this.#right = await this.#createFrame(right)
-                if (cacheKey) {
-                    this.#prerenderedSpreads.set(cacheKey, { left: this.#left, right: this.#right })
-                    this.#spreadAccessTime.set(cacheKey, Date.now())
-                }
+                frames = { left: await this.#createFrame(left), right: await this.#createFrame(right) }
+            }
+            if (navigationId !== this.#navigationId) {
+                for (const frame of Object.values(frames)) frame.element?.remove()
+                return
+            }
+            if (cacheKey) {
+                this.#prerenderedSpreads.set(cacheKey, frames)
+                this.#spreadAccessTime.set(cacheKey, Date.now())
             }
         }
+        this.#left = frames.left ?? null
+        this.#right = frames.right ?? null
+        this.#center = frames.center ?? null
 
         this.#side = center ? 'center' : this.#left?.blank ? 'right'
-            : this.#right?.blank ? 'left' : side
+            : this.#right?.blank ? 'left' : this.#side
         const visibleFrames = center
             ? [this.#center?.element]
             : [this.#left?.element, this.#right?.element]
@@ -360,6 +356,7 @@ export class FixedLayout extends HTMLElement {
         // try to resolve CFIs against it.
         const renderPromises = this.#render()
         if (renderPromises.length) await Promise.all(renderPromises)
+        if (navigationId !== this.#navigationId) return
 
         const showingFrames = center
             ? [this.#center]
@@ -788,10 +785,12 @@ export class FixedLayout extends HTMLElement {
         }, [{}])
     }
     #respread(spreadMode) {
-        if (this.#index === -1) return
+        if (!this.book) return
         const section = this.book.sections[this.index]
         this.#spread(spreadMode)
-        const { index } = this.getSpreadOf(section)
+        this.#layoutGeneration++
+        this.#navigationId++
+        this.#preloadQueue = []
         this.#index = -1
         this.#preloadCache.clear()
         for (const frames of this.#prerenderedSpreads.values()) {
@@ -804,8 +803,12 @@ export class FixedLayout extends HTMLElement {
         }
         this.#prerenderedSpreads.clear()
         this.#spreadAccessTime.clear()
-        this.#overlayers.clear()
-        this.goToSpread(index, this.rtl ? 'right' : 'left', 'page')
+        if (!this.#scrollMode) this.#overlayers.clear()
+        // Scrolled pages are independent of spreads. Apply the new grouping on
+        // returning to paginated mode, without replacing the scrolling frames.
+        if (this.#scrollMode || !section) return
+        const { index, side } = this.getSpreadOf(section)
+        this.goToSpread(index, side, 'page')
     }
     get index() {
         if (this.#scrollMode) return this.#scrollCurrentIndex >= 0
@@ -855,10 +858,15 @@ export class FixedLayout extends HTMLElement {
     }
     async goToSpread(index, side, reason) {
         if (index < 0 || index > this.#spreads.length - 1) return
+        // Record the target before any load awaits: another mode change may
+        // happen while frames are still loading.
+        this.#side = side
         if (index === this.#index) {
-            this.#render(side)
+            this.#render()
+            this.#reportLocation(reason)
             return
         }
+        const navigationId = ++this.#navigationId
         this.#index = index
         const spread = this.#spreads[index]
         const cacheKey = `spread-${index}`
@@ -866,30 +874,33 @@ export class FixedLayout extends HTMLElement {
         if (cached && cached !== 'loading') {
             if (cached.center) {
                 const sectionIndex = this.book.sections.indexOf(spread.center)
-                await this.#showSpread({ center: { index: sectionIndex, src: cached.center }, spreadIndex: index, side })
+                await this.#showSpread({ center: { index: sectionIndex, src: cached.center }, spreadIndex: index, side, navigationId })
             } else {
                 const indexL = this.book.sections.indexOf(spread.left)
                 const indexR = this.book.sections.indexOf(spread.right)
                 const left = { index: indexL, src: cached.left }
                 const right = { index: indexR, src: cached.right }
-                await this.#showSpread({ left, right, side, spreadIndex: index })
+                await this.#showSpread({ left, right, side, spreadIndex: index, navigationId })
             }
         } else {
             if (spread.center) {
                 const sectionIndex = this.book.sections.indexOf(spread.center)
                 const src = await spread.center?.load?.()
-                await this.#showSpread({ center: { index: sectionIndex, src }, spreadIndex: index, side })
+                if (navigationId !== this.#navigationId) return
+                await this.#showSpread({ center: { index: sectionIndex, src }, spreadIndex: index, side, navigationId })
             } else {
                 const indexL = this.book.sections.indexOf(spread.left)
                 const indexR = this.book.sections.indexOf(spread.right)
                 const srcL = await spread.left?.load?.()
                 const srcR = await spread.right?.load?.()
+                if (navigationId !== this.#navigationId) return
                 const left = { index: indexL, src: srcL }
                 const right = { index: indexR, src: srcR }
-                await this.#showSpread({ left, right, side, spreadIndex: index })
+                await this.#showSpread({ left, right, side, spreadIndex: index, navigationId })
             }
         }
 
+        if (navigationId !== this.#navigationId) return
         this.#reportLocation(reason)
         this.#preloadNextSpreads()
     }
@@ -930,16 +941,22 @@ export class FixedLayout extends HTMLElement {
             if (!task) break
 
             const { spread, cacheKey } = task
+            const generation = this.#layoutGeneration
             this.#preloadCache.set(cacheKey, 'loading')
             this.#activePreloads++
             Promise.resolve().then(async () => {
                 try {
                     if (spread.center) {
                         const src = await spread.center?.load?.()
+                        if (generation !== this.#layoutGeneration) return
                         this.#preloadCache.set(cacheKey, { center: src })
 
                         const sectionIndex = this.book.sections.indexOf(spread.center)
                         const frame = await this.#createFrame({ index: sectionIndex, src, detached: true })
+                        if (generation !== this.#layoutGeneration) {
+                            frame.element?.remove()
+                            return
+                        }
 
                         this.#prerenderedSpreads.set(cacheKey, { center: frame })
                         this.#spreadAccessTime.set(cacheKey, Date.now())
@@ -950,12 +967,18 @@ export class FixedLayout extends HTMLElement {
                     } else {
                         const srcL = await spread.left?.load?.()
                         const srcR = await spread.right?.load?.()
+                        if (generation !== this.#layoutGeneration) return
                         this.#preloadCache.set(cacheKey, { left: srcL, right: srcR })
 
                         const indexL = this.book.sections.indexOf(spread.left)
                         const indexR = this.book.sections.indexOf(spread.right)
                         const leftFrame = await this.#createFrame({ index: indexL, src: srcL, detached: true })
                         const rightFrame = await this.#createFrame({ index: indexR, src: srcR, detached: true })
+                        if (generation !== this.#layoutGeneration) {
+                            leftFrame.element?.remove()
+                            rightFrame.element?.remove()
+                            return
+                        }
 
                         this.#prerenderedSpreads.set(cacheKey, { left: leftFrame, right: rightFrame })
                         this.#spreadAccessTime.set(cacheKey, Date.now())
@@ -970,8 +993,10 @@ export class FixedLayout extends HTMLElement {
                         }
                     }
                 } catch {
-                    this.#preloadCache.delete(cacheKey)
-                    this.#prerenderedSpreads.delete(cacheKey)
+                    if (generation === this.#layoutGeneration) {
+                        this.#preloadCache.delete(cacheKey)
+                        this.#prerenderedSpreads.delete(cacheKey)
+                    }
                 } finally {
                     this.#activePreloads--
                     this.#processPreloadQueue()
@@ -1162,6 +1187,9 @@ export class FixedLayout extends HTMLElement {
         return this.#scrollMode ? 'height' : 'width'
     }
     destroy() {
+        this.#layoutGeneration++
+        this.#navigationId++
+        this.#preloadQueue = []
         this.#observer.unobserve(this)
         if (this.#scrollMode) {
             this.removeEventListener('scroll', this.#handleScrollEvent)

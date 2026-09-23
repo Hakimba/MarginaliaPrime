@@ -477,7 +477,8 @@ export async function loadBookConfig(
 ): Promise<BookConfig> {
   const globalViewSettings = {
     ...settings.globalViewSettings,
-    ...(FIXED_LAYOUT_FORMATS.has(book.format) ? DEFAULT_FIXED_LAYOUT_VIEW_SETTINGS : {}),
+    ...(book.isFixedLayout || FIXED_LAYOUT_FORMATS.has(book.format)
+      ? DEFAULT_FIXED_LAYOUT_VIEW_SETTINGS : {}),
   };
   try {
     let str = '{}';
@@ -500,7 +501,8 @@ export async function saveBookConfig(
   if (settings) {
     const globalViewSettings = {
       ...settings.globalViewSettings,
-      ...(FIXED_LAYOUT_FORMATS.has(book.format) ? DEFAULT_FIXED_LAYOUT_VIEW_SETTINGS : {}),
+      ...(book.isFixedLayout || FIXED_LAYOUT_FORMATS.has(book.format)
+        ? DEFAULT_FIXED_LAYOUT_VIEW_SETTINGS : {}),
     };
     serializedConfig = serializeConfig(config, globalViewSettings, DEFAULT_BOOK_SEARCH_CONFIG);
   } else {

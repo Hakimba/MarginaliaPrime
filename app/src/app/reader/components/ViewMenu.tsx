@@ -104,9 +104,7 @@ const ViewMenu: React.FC<ViewMenuProps> = ({ bookKey, setIsDropdownOpen }) => {
 
   useEffect(() => {
     if (spreadMode === viewSettings.spreadMode) return;
-    viewSettings.spreadMode = spreadMode;
     getView(bookKey)?.renderer.setAttribute('spread', spreadMode);
-    setViewSettings(bookKey, viewSettings);
     saveViewSettings(envConfig, bookKey, 'spreadMode', spreadMode, true, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spreadMode]);
@@ -114,11 +112,9 @@ const ViewMenu: React.FC<ViewMenuProps> = ({ bookKey, setIsDropdownOpen }) => {
   useEffect(() => {
     if (keepCoverSpread === viewSettings.keepCoverSpread) return;
     if (!bookData?.bookDoc?.sections?.length) return;
-    viewSettings.keepCoverSpread = keepCoverSpread;
     const coverSide = bookData.bookDoc.dir === 'rtl' ? 'right' : 'left';
     bookData.bookDoc.sections[0]!.pageSpread = keepCoverSpread ? '' : coverSide;
     getView(bookKey)?.renderer.setAttribute('spread', spreadMode);
-    setViewSettings(bookKey, viewSettings);
     saveViewSettings(envConfig, bookKey, 'keepCoverSpread', keepCoverSpread, true, false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keepCoverSpread]);
@@ -173,31 +169,35 @@ const ViewMenu: React.FC<ViewMenuProps> = ({ bookKey, setIsDropdownOpen }) => {
           </div>
 
           <>
+            <div className='my-2 flex flex-col gap-1' role='group' aria-label='Disposition des pages'>
+              <button
+                type='button'
+                aria-pressed={spreadMode === 'none'}
+                onClick={() => setSpreadMode('none')}
+                className={clsx(
+                  'hover:bg-base-300 flex items-center gap-2 whitespace-nowrap rounded-md p-2 text-sm',
+                  spreadMode === 'none' && 'bg-base-300/75',
+                )}
+              >
+                <TbColumns1 aria-hidden='true' /> Une page
+              </button>
+              <button
+                type='button'
+                aria-pressed={spreadMode === 'auto'}
+                title='Deux pages côte à côte, une seule si la fenêtre est trop étroite'
+                onClick={() => setSpreadMode('auto')}
+                className={clsx(
+                  'hover:bg-base-300 flex items-center gap-2 whitespace-nowrap rounded-md p-2 text-sm',
+                  spreadMode === 'auto' && 'bg-base-300/75',
+                )}
+              >
+                <TbColumns2 aria-hidden='true' /> Deux pages (auto)
+              </button>
+            </div>
             <div
               title={_('Zoom Mode')}
               className={clsx('my-2 flex items-center justify-between rounded-md')}
             >
-              <button
-                title={_('Single Page')}
-                onClick={setSpreadMode.bind(null, 'none')}
-                className={clsx(
-                  'hover:bg-base-300 text-base-content rounded-full p-2',
-                  spreadMode === 'none' && 'bg-base-300/75',
-                )}
-              >
-                <TbColumns1 />
-              </button>
-              <button
-                title={_('Auto Spread')}
-                onClick={setSpreadMode.bind(null, 'auto')}
-                className={clsx(
-                  'hover:bg-base-300 text-base-content rounded-full p-2',
-                  spreadMode === 'auto' && 'bg-base-300/75',
-                )}
-              >
-                <TbColumns2 />
-              </button>
-              <div className='bg-base-300 mx-2 h-6 w-[1px]' />
               <button
                 title={_('Fit Page')}
                 onClick={setZoomMode.bind(null, 'fit-page')}

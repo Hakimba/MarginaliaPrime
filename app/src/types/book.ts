@@ -31,6 +31,7 @@ export interface Book {
   // Metadata md5 hash, used to aggregate different versions of the same book
   metaHash?: string;
   format: BookFormat;
+  isFixedLayout?: boolean;
   title: string; // editable title from metadata
   sourceTitle?: string; // parsed when the book is imported and used to locate the file
   author: string;
