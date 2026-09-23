@@ -1,7 +1,8 @@
+import katex from 'katex';
 import { describe, expect, it } from 'vitest';
 
 import { buildCliArgs } from './claudeCliEngine';
-import { buildHarness, buildTurnMessage, buildTurnText } from './harness';
+import { ANNOTATED_EXAMPLE, buildHarness, buildTurnMessage, buildTurnText } from './harness';
 import { parseCliLine } from './parseCliEvent';
 import type { EngineContext, EngineStartOptions } from './types';
 
@@ -278,5 +279,58 @@ describe('buildHarness', () => {
     const harness = buildHarness({ bookTitle: '', bookAuthor: '', webSearch: true });
     expect(harness).toContain('recherche web');
     expect(harness).toContain('un livre technique');
+  });
+
+  const renders = (tex: string): boolean => {
+    try {
+      katex.renderToString(tex, { displayMode: true, throwOnError: true, strict: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it('prescribes only what KaTeX renders', () => {
+    const harness = buildHarness({ bookTitle: '', bookAuthor: '', webSearch: false });
+    const colours = [...new Set([...harness.matchAll(/#[0-9a-f]{6}/g)].map((m) => m[0]))];
+    expect(colours).toHaveLength(5);
+    const prescribed = [
+      '\\underbrace{a+b}_{\\text{somme}}',
+      '\\overbrace{a}^{\\text{terme}}',
+      '\\boxed{x}',
+      ...colours.map((c) => `\\textcolor{${c}}{x}`),
+      '\\overset{\\textcircled{1}}{P(A)}',
+      '\\dfrac{\\dfrac{}{\\vdash \\mathsf{0} : \\mathsf{Nat}}\\;\\textsf{(T-Zero)} \\quad t}{\\vdash \\mathsf{succ}\\ \\mathsf{0}}\\;\\textsf{(T-Succ)}',
+      ...['aligned', 'cases', 'matrix', 'pmatrix', 'bmatrix'].map(
+        (env) => `\\begin{${env}} a & b \\\\ c & d \\end{${env}}`,
+      ),
+      '\\begin{array}{cc} a & b \\end{array}',
+    ];
+    for (const tex of prescribed) {
+      expect(harness.includes(tex.split(/[{_^ ]/)[0]!), tex).toBe(true);
+      expect(renders(tex), tex).toBe(true);
+    }
+  });
+
+  it('gives an annotated example that KaTeX renders', () => {
+    const harness = buildHarness({ bookTitle: '', bookAuthor: '', webSearch: false });
+    expect(harness).toContain(ANNOTATED_EXAMPLE);
+    expect(renders(ANNOTATED_EXAMPLE.replace(/^\$\$|\$\$$/g, ''))).toBe(true);
+  });
+
+  it('forbids what KaTeX cannot render', () => {
+    const harness = buildHarness({ bookTitle: '', bookAuthor: '', webSearch: false });
+    expect(harness).toContain('Jamais \\(…\\) ni \\[…\\]');
+    const forbidden: [string, string][] = [
+      ['\\infer', '\\infer{a}{b}'],
+      ['\\AxiomC', '\\AxiomC{a}'],
+      ['\\xymatrix', '\\xymatrix{a}'],
+      ['\\label', 'x \\label{eq}'],
+      ['\\eqref', '\\eqref{eq}'],
+    ];
+    for (const [command, tex] of forbidden) {
+      expect(harness, command).toContain(command);
+      expect(renders(tex), tex).toBe(false);
+    }
   });
 });

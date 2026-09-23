@@ -688,6 +688,13 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     useChatStore.getState().setOpen(true);
   };
 
+  /** Ctrl+E: attach the selection and ask for an explanation at once. */
+  const handleExplainSelection = () => {
+    if (!selection || !selection.text) return;
+    handleSendToChat();
+    useChatStore.getState().requestAsk('Explique ce passage.');
+  };
+
   const handleStartEditAnnotation = useCallback(() => {
     setShowAnnotPopup(false);
   }, []);
@@ -712,6 +719,9 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
       },
       onSendToChat: () => {
         handleSendToChat();
+      },
+      onExplainSelection: () => {
+        handleExplainSelection();
       },
     },
     [selection?.text],

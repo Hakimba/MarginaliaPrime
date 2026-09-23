@@ -14,6 +14,8 @@ session, which XWayland serves).
     scripts/ui-drive.py drag 200 300 480 300
     scripts/ui-drive.py move 400 300
     scripts/ui-drive.py dblclick 400 300
+    scripts/ui-drive.py key ctrl+e
+    scripts/ui-drive.py scroll 400 300 5     (wheel down 5 notches; negative is up)
 
 Coordinates are relative to the window's top-left corner.
 
@@ -25,12 +27,16 @@ finished once another one follows, and the ritual is:
 
 `pump` presses in the chat panel's empty area, which changes nothing in the
 page but lets the previous release through.
+
+Keys: start the app with GTK_IM_MODULE=gtk-im-context-simple. Through ibus,
+a synthetic Ctrl is lost on the way: Ctrl+E reaches the page as a plain "e",
+typed into whatever field had the focus last.
 """
 
 import sys
 import time
 
-from Xlib import X, display
+from Xlib import X, XK, display
 from Xlib.ext import xtest
 
 WINDOW_NAME = "Marginalia"
@@ -86,6 +92,40 @@ def release(dsp, window, x, y, button=1):
     time.sleep(0.15)
 
 
+MODIFIERS = {"ctrl": "Control_L", "shift": "Shift_L", "alt": "Alt_L", "super": "Super_L"}
+
+
+def key(dsp, window, combo):
+    """Press a key combination such as ctrl+e, modifiers first, released in reverse."""
+    window.set_input_focus(X.RevertToParent, X.CurrentTime)
+    names = [MODIFIERS.get(part.lower(), part) for part in combo.split("+")]
+    codes = []
+    for name in names:
+        keysym = XK.string_to_keysym(name)
+        if not keysym:
+            raise SystemExit(f"unknown key {name!r}")
+        codes.append(dsp.keysym_to_keycode(keysym))
+    for code in codes:
+        xtest.fake_input(dsp, X.KeyPress, code)
+        dsp.sync()
+        time.sleep(0.03)
+    for code in reversed(codes):
+        xtest.fake_input(dsp, X.KeyRelease, code)
+        dsp.sync()
+        time.sleep(0.03)
+
+
+def scroll(dsp, window, x, y, notches):
+    """Turn the wheel: buttons 4 (up) and 5 (down), one click per notch."""
+    move(dsp, window, x, y)
+    button = 5 if int(notches) > 0 else 4
+    for _ in range(abs(int(notches))):
+        xtest.fake_input(dsp, X.ButtonPress, button)
+        xtest.fake_input(dsp, X.ButtonRelease, button)
+        dsp.sync()
+        time.sleep(0.05)
+
+
 def shot(dsp, window, path, crop=None):
     """Read the window's pixels, in bands to stay under the maximum request size."""
     from PIL import Image
@@ -129,7 +169,11 @@ def main():
         dsp.sync()
         return
 
-    if command == "move":
+    if command == "key":
+        key(dsp, window, args[0])
+    elif command == "scroll":
+        scroll(dsp, window, args[0], args[1], args[2] if len(args) > 2 else 3)
+    elif command == "move":
         move(dsp, window, args[0], args[1])
     elif command == "click":
         x, y = args[0], args[1]
