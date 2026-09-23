@@ -41,7 +41,21 @@ export const useLongPress = (
   const pointerEventTimeoutRef = useRef<ReturnType<typeof setTimeout>>(null);
   const isLongPressTriggered = useRef(false);
 
+  const capturedBy = useRef<Element | null>(null);
+
+  const releaseCapture = useCallback(() => {
+    const element = capturedBy.current;
+    capturedBy.current = null;
+    if (!element || pointerId.current == null) return;
+    try {
+      element.releasePointerCapture(pointerId.current);
+    } catch {
+      // The pointer may already be gone; nothing to release.
+    }
+  }, []);
+
   const reset = useCallback(() => {
+    releaseCapture();
     setPressing(false);
     isLongPressTriggered.current = false;
     startPosRef.current = null;
@@ -49,7 +63,7 @@ export const useLongPress = (
     if (timerRef.current) {
       clearTimeout(timerRef.current);
     }
-  }, []);
+  }, [releaseCapture]);
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -64,6 +78,18 @@ export const useLongPress = (
 
       pointerId.current = e.pointerId;
       startPosRef.current = { x: e.clientX, y: e.clientY };
+
+      // Hold the pointer for the whole press. The press feedback shrinks the
+      // item by 5%, so its edge can slide out from under a cursor that has not
+      // moved; the browser then fires pointerleave, the press is cancelled and
+      // the click is lost. Capture makes a press depend on the finger only.
+      const element = e.currentTarget as Element;
+      try {
+        element.setPointerCapture(e.pointerId);
+        capturedBy.current = element;
+      } catch {
+        capturedBy.current = null;
+      }
       isLongPressTriggered.current = false;
       setPressing(true);
 
@@ -128,6 +154,15 @@ export const useLongPress = (
     [onCancel, reset],
   );
 
+  /** With the pointer captured, leaving the element is not a cancellation. */
+  const handleLeave = useCallback(
+    (e: React.PointerEvent) => {
+      if (capturedBy.current) return;
+      handleCancel(e);
+    },
+    [handleCancel],
+  );
+
   const handleClick = useCallback(() => {
     // This is only for aria activation, if the user has used pointer events, we ignore the click event
     if (!hasPointerEventsRef.current) {
@@ -165,7 +200,7 @@ export const useLongPress = (
       onPointerUp: handlePointerUp,
       onPointerMove: handlePointerMove,
       onPointerCancel: handleCancel,
-      onPointerLeave: handleCancel,
+      onPointerLeave: handleLeave,
       onClick: handleClick,
       onContextMenu: handleContextMenu,
     },

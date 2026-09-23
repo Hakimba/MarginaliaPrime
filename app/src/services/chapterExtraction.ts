@@ -99,6 +99,18 @@ export function domToStructuredText(node: Node): string {
     // Skip hidden elements, scripts, styles
     if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return;
 
+    // Text of a PDF page that sits next to what is being read rather than
+    // inside it, set aside by the reading-order pass: a marginal gloss, or the
+    // lettering of a graphic (axis ticks, legends). Announced as such so the
+    // model never reads an axis tick as part of a sentence.
+    const zone = el.getAttribute?.('data-zone');
+    if (zone === 'margin' || zone === 'figure') {
+      const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+      const label = zone === 'margin' ? 'note de marge' : 'figure';
+      if (text) parts.push(`\n[${label}] ${text}\n`);
+      return;
+    }
+
     // Footnote reference: keep it readable and out of the sentence.
     if (matches(el, NOTE_REF_SELECTOR)) {
       const label = el.textContent?.trim();
@@ -229,8 +241,16 @@ async function collectSections(bookDoc: BookDoc, first: number, last: number): P
       if (!doc) continue;
       const text = domToStructuredText(doc.body ?? doc.documentElement);
       if (text) parts.push(text);
-    } catch {
-      // A page that fails to load is skipped rather than losing the window.
+    } catch (e) {
+      // A page that fails to load is skipped rather than losing the window,
+      // but never in silence: an empty chapter used to look like a model
+      // failure rather than an extraction failure.
+      console.warn(
+        'Page text extraction failed on section',
+        i,
+        (e as Error)?.name,
+        (e as Error)?.message,
+      );
     }
   }
   return parts.join('\n\n');

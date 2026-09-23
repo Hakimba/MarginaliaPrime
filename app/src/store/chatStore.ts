@@ -59,7 +59,9 @@ export const useChatStore = create<ChatState>()(
   persist(
     (set) => ({
       isOpen: false,
-      isPinned: false,
+      // Docked by default: the panel takes its own width and the page is laid
+      // out next to it, instead of covering the text being read.
+      isPinned: true,
       panelWidth: 380,
       pendingSelections: [],
 
@@ -102,6 +104,11 @@ export const useChatStore = create<ChatState>()(
     }),
     {
       name: 'marginalia-chat',
+      // 2: the panel docks instead of covering the reader.  Readers who had
+      // the old default stored keep a floating panel otherwise.
+      version: 2,
+      migrate: (state, version) =>
+        version < 2 ? { ...(state as object), isPinned: true } : state,
       partialize: (state) => ({
         isOpen: state.isOpen,
         isPinned: state.isPinned,

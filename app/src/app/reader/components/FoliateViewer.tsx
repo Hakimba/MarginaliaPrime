@@ -61,6 +61,7 @@ import { getLocale } from '@/utils/misc';
 import { isFontType } from '@/utils/font';
 import { extractChapterText, findTopLevelAncestor } from '@/services/chapterExtraction';
 import { perfMark, perfSpan } from '@/utils/perf';
+import { useSelectionProbe } from '../hooks/useSelectionProbe';
 import Spinner from '@/components/Spinner';
 import ImageViewer from './ImageViewer';
 import TableViewer from './TableViewer';
@@ -170,6 +171,7 @@ const FoliateViewer: React.FC<{
 
   useUICSS(bookKey);
   useProgressAutoSave(bookKey);
+  useSelectionProbe(bookKey);
   useBookCoverAutoSave(bookKey);
   const progressRelocateHandler = (event: Event) => {
     const detail = (event as CustomEvent).detail;

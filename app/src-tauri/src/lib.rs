@@ -110,8 +110,25 @@ struct SingleInstancePayload {
     cwd: String,
 }
 
+/// WebKitGTK's dmabuf renderer sometimes never completes a canvas render: the
+/// PDF page stays blank for good, with no error anywhere, because pdf.js is
+/// still waiting for its render task. Observed on this machine on three runs
+/// out of three, then never again with this path off. Turning it off keeps
+/// compositing and measures the same time per page, so it is set here unless
+/// the environment already says otherwise.
+#[cfg(target_os = "linux")]
+fn work_around_webkit_dmabuf() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        // SAFETY: called before any thread is spawned, at the very start of run.
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    work_around_webkit_dmabuf();
+
     let builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()

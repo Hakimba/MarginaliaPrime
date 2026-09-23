@@ -15,6 +15,7 @@ import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 
 import { useChatStore } from '@/store/chatStore';
+import { perfMark } from '@/utils/perf';
 import { useSidebarStore } from '@/store/sidebarStore';
 
 import {
@@ -76,6 +77,21 @@ const ChatPanel: React.FC = () => {
 
   const isResizing = useRef(false);
 
+  /**
+   * The panel may never take the whole window: a width remembered from a large
+   * window left the reader six pixels wide in a small one, and the pages were
+   * being rendered at one percent of their size.
+   */
+  const maxPanelWidth = () => Math.max(280, Math.min(800, Math.round(window.innerWidth * 0.6)));
+  const [windowWidth, setWindowWidth] = useState(0);
+  useEffect(() => {
+    const onResize = () => setWindowWidth(window.innerWidth);
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const shownWidth = windowWidth ? Math.min(panelWidth, maxPanelWidth()) : panelWidth;
+
   const handleResizeStart = (e: ReactPointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -93,7 +109,7 @@ const ChatPanel: React.FC = () => {
 
     const onMove = (ev: globalThis.PointerEvent) => {
       const delta = startX - ev.clientX;
-      setPanelWidth(Math.max(280, Math.min(800, startWidth + delta)));
+      setPanelWidth(Math.max(280, Math.min(maxPanelWidth(), startWidth + delta)));
     };
     const onUp = () => {
       isResizing.current = false;
@@ -237,6 +253,18 @@ const ChatPanel: React.FC = () => {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingContent]);
+
+  // Docked, the panel takes its width from the reader instead of covering it;
+  // the mark records what the page is actually left with.
+  useEffect(() => {
+    if (!isOpen) return;
+    perfMark('chat:panel-open', {
+      docked: isPinned,
+      panel: shownWidth,
+      reader: document.querySelector('.books-grid')?.clientWidth ?? 0,
+      window: window.innerWidth,
+    });
+  }, [isOpen, isPinned, shownWidth]);
 
   useEffect(() => {
     if (isOpen) setTimeout(() => inputRef.current?.focus(), 100);
@@ -720,7 +748,7 @@ const ChatPanel: React.FC = () => {
         'chat-panel border-base-300 bg-base-100 flex flex-col border-l',
         isPinned ? 'relative' : 'fixed top-0 right-0 bottom-0 z-[45] shadow-xl',
       )}
-      style={{ width: panelWidth, minWidth: 280, maxWidth: 800 }}
+      style={{ width: shownWidth, minWidth: 280, maxWidth: 800 }}
     >
       {/* Wider hit zone than the visible line: 4 pixels are unusable. */}
       <div
@@ -865,9 +893,24 @@ const ChatPanel: React.FC = () => {
               {pendingSelections.length > 1 && (
                 <span className='text-base-content/50 shrink-0 text-xs'>{index + 1}.</span>
               )}
-              <div className='text-base-content/70 flex-1 line-clamp-3 text-xs italic'>
-                &ldquo;{selection.text}&rdquo;
-              </div>
+              {/* The passage as it will be sent, in full: what the model reads
+                  is not always what the page shows, and it has to be checkable
+                  before sending. */}
+              <details className='flex-1'>
+                <summary
+                  className='text-base-content/70 line-clamp-2 cursor-pointer text-xs italic'
+                  title='Afficher toute la sélection'
+                >
+                  &ldquo;{selection.text}&rdquo;
+                </summary>
+                <div className='text-base-content/70 mt-1 max-h-40 overflow-y-auto text-xs whitespace-pre-wrap select-text'>
+                  {selection.text}
+                </div>
+                <div className='text-base-content/40 mt-1 text-[10px]'>
+                  {selection.text.length} caractères
+                  {selection.location ? ` · ${selection.location}` : ''}
+                </div>
+              </details>
               <button
                 className='btn btn-ghost btn-xs btn-square shrink-0'
                 onClick={() => removeSelection(index)}

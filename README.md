@@ -55,6 +55,7 @@ Reading, inherited from Readest:
 - Highlights, bookmarks, annotations
 - Export annotations as Markdown
 - Full-text search
+- Precise mouse selection on a PDF page: a word, a formula, a line, without the marginal notes
 - Dark, light and automatic theme
 - Customisable fonts, margins and layout
 
@@ -105,6 +106,8 @@ Two scripts help when the change has to be judged on the real app rather than on
 - `scripts/smoke-chat.sh <book-hash> "<step>|<step>"` — replays a whole chat scenario against the
   release binary, with no clicking. A step is a question, or one of `newconv`, `delete`,
   `book:<hash>`, `model:<id>`, `abort`, `wait:<ms>`. It uses the real subscription.
+- `scripts/selection-probe.sh <book-hash> <page>` — replays real mouse drags on a PDF page and prints
+  what each one selected against what the page's geometry says it should.
 
 ## Built with
 

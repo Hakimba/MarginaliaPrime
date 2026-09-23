@@ -172,6 +172,7 @@ export class FixedLayout extends HTMLElement {
         if (!src) return { blank: true, element, iframe }
         return new Promise(resolve => {
             iframe.addEventListener('load', () => {
+                globalThis.__perfMark?.('pdf:frame-load', { index })
                 const doc = iframe.contentDocument
                 iframe.dataset.sectionIndex = index
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index } }))
@@ -529,6 +530,7 @@ export class FixedLayout extends HTMLElement {
         if (!src) return { blank: true, element, iframe }
         return new Promise(resolve => {
             iframe.addEventListener('load', () => {
+                globalThis.__perfMark?.('pdf:frame-load', { index })
                 const doc = iframe.contentDocument
                 iframe.dataset.sectionIndex = pageData.index
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index: pageData.index } }))

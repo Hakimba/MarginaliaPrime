@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { RiDeleteBinLine } from 'react-icons/ri';
 
 import * as CFI from 'foliate-js/epubcfi.js';
 import { Overlayer } from 'foliate-js/overlayer.js';
@@ -18,19 +17,26 @@ import { useResponsiveSize } from '@/hooks/useResponsiveSize';
 import { useDeviceControlStore } from '@/store/deviceStore';
 import { useFoliateEvents } from '../../hooks/useFoliateEvents';
 import { useTextSelector } from '../../hooks/useTextSelector';
-import { Point, Position, TextSelection } from '@/utils/sel';
-import { getPopupPosition, getPosition, getTextFromRange } from '@/utils/sel';
+import {
+  collectPdfLinesAround,
+  getPopupPosition,
+  getPosition,
+  getTextFromRange,
+  isPointerOnRange,
+  normalizeSelectedText,
+  Point,
+  Position,
+  TextSelection,
+} from '@/utils/sel';
 import { eventDispatcher } from '@/utils/event';
 import { findTocItemBS } from '@/utils/toc';
-import { throttle } from '@/utils/throttle';
 
 import { getIndexFromCfi, isCfiInLocation } from '@/utils/cfi';
 import { TransformContext } from '@/services/transformers/types';
 import { transformContent } from '@/services/transformService';
 import { getHighlightColorHex } from '../../utils/annotatorUtil';
-import { annotationToolButtons } from './AnnotationTools';
 import AnnotationRangeEditor from './AnnotationRangeEditor';
-import AnnotationPopup from './AnnotationPopup';
+import AskAiBubble from './AskAiBubble';
 import useShortcuts from '@/hooks/useShortcuts';
 import { useChatStore } from '@/store/chatStore';
 import ExportMarkdownDialog from './ExportMarkdownDialog';
@@ -58,11 +64,7 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
   const [selection, setSelection] = useState<TextSelection | null>(null);
   const [showAnnotPopup, setShowAnnotPopup] = useState(false);
   const [showDeepLPopup, _setShowDeepLPopup] = useState(false);
-  const [trianglePosition, setTrianglePosition] = useState<Position>();
   const [annotPopupPosition, setAnnotPopupPosition] = useState<Position>();
-  const [highlightOptionsVisible, setHighlightOptionsVisible] = useState(false);
-  const [showAnnotationNotes, setShowAnnotationNotes] = useState(false);
-  const [annotationNotes, setAnnotationNotes] = useState<BookNote[]>([]);
   const [editingAnnotation, setEditingAnnotation] = useState<BookNote | null>(null);
   const [externalDragPoint, setExternalDragPoint] = useState<Point | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
@@ -86,8 +88,9 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
   const popupPadding = useResponsiveSize(10);
   const trianglePadding = popupPadding * 2 + 6;
   const maxWidth = window.innerWidth - 2 * popupPadding;
-  const annotPopupWidth = Math.min(useResponsiveSize(240), maxWidth);
-  const annotPopupHeight = useResponsiveSize(44);
+  // The size of the Ask AI bubble, which is what decides where it is put.
+  const annotPopupWidth = Math.min(useResponsiveSize(90), maxWidth);
+  const annotPopupHeight = useResponsiveSize(34);
   const androidSelectionHandlerHeight = 0;
 
   // Reposition popups on scroll without dismissing them
@@ -110,7 +113,6 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     }
     if (triangPos.point.x == 0 || triangPos.point.y == 0) return;
     setAnnotPopupPosition(annotPopupPos);
-    setTrianglePosition(triangPos);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selection, bookKey, viewSettings.vertical]);
 
@@ -143,15 +145,11 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     [primaryLang, transformCtx],
   );
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const handleDismissPopup = useCallback(
-    throttle(() => {
-      setSelection(null);
-      setShowAnnotPopup(false);
-      setEditingAnnotation(null);
-    }, 500),
-    [],
-  );
+  const handleDismissPopup = useCallback(() => {
+    setSelection(null);
+    setShowAnnotPopup(false);
+    setEditingAnnotation(null);
+  }, []);
 
   const {
     isTextSelected,
@@ -213,6 +211,35 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
       listenToNativeTouchEvents();
       eventDispatcher.on('native-touch', handleNativeTouch);
     }
+
+    /** Where the current selection is drawn, or null when there is none. */
+    const pressedOnPassage = (ev: MouseEvent) => {
+      const sel = detail.doc?.getSelection();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+      return isPointerOnRange(sel.getRangeAt(0), ev.clientX, ev.clientY);
+    };
+
+    // Pressing a passage must not undo it: the browser's default action is to
+    // put the caret there, which drops the selection before the click that was
+    // meant to bring up the Ask AI bubble. Only that default is called off —
+    // the click event still fires, so turning the page still works.
+    let keptOnPress = false;
+    const keepPassageOnPress = (ev: MouseEvent) => {
+      keptOnPress = pressedOnPassage(ev);
+      if (keptOnPress) ev.preventDefault();
+      else setShowAnnotPopup(false); // away from it: the bubble goes at once
+    };
+    // A drag that starts on a passage cannot select, the press having been
+    // called off, so the passage is dropped and the next drag behaves.
+    const releasePassageOnDrag = (ev: MouseEvent) => {
+      if (!keptOnPress || (ev.buttons & 1) === 0) return;
+      keptOnPress = false;
+      detail.doc?.getSelection()?.removeAllRanges();
+      setSelection(null);
+      setShowAnnotPopup(false);
+    };
+    detail.doc?.addEventListener('mousedown', keepPassageOnPress, { capture: true });
+    detail.doc?.addEventListener('mousemove', releasePassageOnDrag, { capture: true });
 
     // Attach generic selection listeners for all formats, including PDF.
     // For PDF we only guarantee Copy; highlight/annotate may be limited by CFI support.
@@ -322,14 +349,10 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
       page: annotation.page || progress.page,
     };
     if (isNote) {
-      setShowAnnotationNotes(true);
-      setHighlightOptionsVisible(false);
       setEditingAnnotation(null);
     } else {
       setShowAnnotPopup(false);
       setEditingAnnotation(null);
-      setShowAnnotationNotes(false);
-      setAnnotationNotes([]);
       if (style && color) {
         setSelectedStyle(style);
         setSelectedColor(color);
@@ -420,7 +443,6 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
   };
 
   useEffect(() => {
-    setHighlightOptionsVisible(!!(selection && selection.annotated));
     if (selection && selection.text.trim().length > 0) {
       const gridFrame = document.querySelector(`#gridcell-${bookKey}`);
       if (!gridFrame) return;
@@ -439,12 +461,13 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
       }
       if (triangPos.point.x == 0 || triangPos.point.y == 0) return;
       setAnnotPopupPosition(annotPopupPos);
-      setTrianglePosition(triangPos);
 
       const { enableAnnotationQuickActions, annotationQuickAction } = viewSettings;
       if (enableAnnotationQuickActions && annotationQuickAction && isTextSelected.current) {
         handleQuickAction();
-      } else {
+      } else if (!selection.quiet) {
+        // A passage that was just dragged stays silent: the bubble waits for a
+        // click on it rather than covering the text on every drag.
         handleShowAnnotPopup();
       }
     }
@@ -480,16 +503,6 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [progress]);
-
-  useEffect(() => {
-    if (!config.booknotes || !selection?.cfi || !showAnnotationNotes) return;
-    const annotations = config.booknotes.filter(
-      (booknote) =>
-        booknote.type === 'annotation' && !booknote.deletedAt && booknote.cfi === selection.cfi,
-    );
-    const notes = annotations.filter((item) => item.note && item.note.trim().length > 0);
-    setAnnotationNotes(notes);
-  }, [selection?.cfi, showAnnotationNotes, config.booknotes]);
 
   const handleShowAnnotPopup = () => {
     if (!appService?.isMobile) {
@@ -551,7 +564,6 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
 
   const handleHighlight = (update = false, highlightStyle?: HighlightStyle) => {
     if (!selection || !selection.text) return;
-    setHighlightOptionsVisible(true);
     const { booknotes: annotations = [] } = config;
     const cfi = view?.getCFI(selection.index, selection.range);
     if (!cfi) return;
@@ -633,8 +645,17 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
       const view = getView(bookKey);
       if (view && selection.range) {
         const container = selection.range.commonAncestorContainer;
-        const parentEl = container.nodeType === Node.TEXT_NODE ? container.parentElement : container as Element;
-        if (parentEl) {
+        const parentEl =
+          container.nodeType === Node.TEXT_NODE
+            ? container.parentElement
+            : (container as Element);
+        const isPdfPage = !!parentEl?.closest?.('.textLayer');
+        if (parentEl && isPdfPage) {
+          // A PDF page has no paragraphs: spans are siblings, one line ending
+          // at every <br>. Take three lines on each side rather than three
+          // words, which is all the sibling walk below would have found.
+          surroundingText = collectPdfLinesAround(parentEl, 3);
+        } else if (parentEl) {
           // Get a few sibling paragraphs for context
           const siblings: string[] = [];
           let el: Element | null = parentEl;
@@ -660,8 +681,8 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     // The chapter text and the book metadata live in the store already; a
     // selection only carries what is specific to this passage.
     useChatStore.getState().addSelection({
-      text: selection.text,
-      surroundingText,
+      text: normalizeSelectedText(selection.text),
+      surroundingText: normalizeSelectedText(surroundingText),
       location: chapterTitle,
     });
     useChatStore.getState().setOpen(true);
@@ -767,54 +788,16 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     setExportData(null);
   };
 
-  const selectionAnnotated = selection?.annotated;
-  const toolButtons = annotationToolButtons.map(({ type, label, Icon }) => {
-    switch (type) {
-      case 'copy':
-        return { tooltipText: _(label), Icon, onClick: handleCopy };
-      case 'highlight':
-        return {
-          tooltipText: selectionAnnotated ? _('Delete Highlight') : _(label),
-          Icon: selectionAnnotated ? RiDeleteBinLine : Icon,
-          onClick: handleHighlight,
-        };
-      case 'annotate':
-        return {
-          tooltipText: _(label),
-          Icon,
-          onClick: handleAnnotate,
-        };
-      case 'search':
-        return {
-          tooltipText: _(label),
-          Icon,
-          onClick: handleSearch,
-        };
-      case 'chat':
-        return { tooltipText: _(label), Icon, onClick: handleSendToChat };
-      default:
-        return { tooltipText: '', Icon, onClick: () => {} };
-    }
-  });
 
   return (
     <div ref={containerRef} role='toolbar' tabIndex={-1}>
-      {showAnnotPopup && trianglePosition && annotPopupPosition && (
-        <AnnotationPopup
-          bookKey={bookKey}
-          dir={viewSettings.rtl ? 'rtl' : 'ltr'}
-          isVertical={viewSettings.vertical}
-          buttons={toolButtons}
-          notes={annotationNotes}
+      {showAnnotPopup && annotPopupPosition && (
+        <AskAiBubble
           position={annotPopupPosition}
-          trianglePosition={trianglePosition}
-          highlightOptionsVisible={highlightOptionsVisible}
-          selectedStyle={selectedStyle}
-          selectedColor={selectedColor}
-          popupWidth={annotPopupWidth}
-          popupHeight={annotPopupHeight}
-          onHighlight={handleHighlight}
-          onDismiss={handleDismissPopupAndSelection}
+          onAsk={() => {
+            handleSendToChat();
+            setShowAnnotPopup(false);
+          }}
         />
       )}
       {editingAnnotation && editingAnnotation.color && selection && (
