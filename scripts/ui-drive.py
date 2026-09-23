@@ -52,7 +52,7 @@ def find_window(dsp, name=WINDOW_NAME):
 
 def origin_of(dsp, window):
     """Where the window's top-left corner sits on screen."""
-    point = window.translate_coords(dsp.screen().root, 0, 0)
+    point = dsp.screen().root.translate_coords(window, 0, 0)
     return point.x, point.y
 
 

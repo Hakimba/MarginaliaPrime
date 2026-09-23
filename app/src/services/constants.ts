@@ -200,6 +200,7 @@ export const DEFAULT_CJK_VIEW_SETTINGS: Partial<ViewSettings> = {
 
 export const DEFAULT_FIXED_LAYOUT_VIEW_SETTINGS: Partial<ViewSettings> = {
   overrideColor: false,
+  spreadMode: 'none',
 };
 
 export const DEFAULT_VIEW_CONFIG: ViewConfig = {

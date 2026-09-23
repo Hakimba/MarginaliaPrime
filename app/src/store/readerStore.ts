@@ -160,6 +160,9 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
         bookDoc = doc.book;
         endParse({ sections: bookDoc.sections?.length, layout: bookDoc.rendition?.layout });
       }
+      const isFixedLayout =
+        bookDoc.rendition?.layout === 'pre-paginated' || FIXED_LAYOUT_FORMATS.has(book.format);
+      book.isFixedLayout = isFixedLayout;
       const config = await appService.loadBookConfig(book, settings);
       // Import annotations from third-party readers on first open
       if (bookDoc.metadata.identifier) {
@@ -213,8 +216,6 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
       // book.metaHash = book.metaHash ?? getMetadataHash(bookDoc.metadata);
       book.metaHash = getMetadataHash(bookDoc.metadata);
 
-      const isFixedLayout =
-        bookDoc.rendition?.layout === 'pre-paginated' || FIXED_LAYOUT_FORMATS.has(book.format);
       const newBookData: BookData = { id, book, file, config, bookDoc, isFixedLayout };
       useBookDataStore.setState((state) => ({
         booksData: {

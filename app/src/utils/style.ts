@@ -16,6 +16,15 @@ import {
 } from '@/styles/themes';
 import { getOSPlatform } from './misc';
 
+// Keep the reading surface's cursor steady, including publisher-defined styles.
+// Interactive elements keep their own cursor and selection remains native.
+const readingCursorStyles = `
+  html, body, body *:not(a, a *, button, button *, input, textarea, select,
+    [role="button"], [role="button"] *, [contenteditable="true"], [contenteditable="true"] *) {
+    cursor: default !important;
+  }
+`;
+
 const getFontStyles = (
   serif: string,
   sansSerif: string,
@@ -608,7 +617,7 @@ export const getStyles = (viewSettings: ViewSettings, themeCode?: ThemeCode) => 
     viewSettings.isEink,
   );
   const userStylesheet = viewSettings.userStylesheet!;
-  return `${layoutStyles}\n${fontStyles}\n${colorStyles}\n${userStylesheet}`;
+  return `${layoutStyles}\n${fontStyles}\n${colorStyles}\n${readingCursorStyles}\n${userStylesheet}`;
 };
 
 export const transformStylesheet = (css: string, vw: number, vh: number, vertical: boolean) => {
@@ -927,6 +936,7 @@ export const applyFixedlayoutStyles = (
   style = document.createElement('style');
   style.id = existingStyleId;
   style.textContent = `
+    ${readingCursorStyles}
     html {
       --theme-bg-color: ${bg};
       --theme-fg-color: ${fg};
