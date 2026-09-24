@@ -11,8 +11,7 @@ import React, {
 import { FiCode, FiGlobe, FiPlus, FiSearch, FiSend, FiTrash2, FiX } from 'react-icons/fi';
 import { BsPin, BsPinFill } from 'react-icons/bs';
 import clsx from 'clsx';
-import DOMPurify from 'dompurify';
-import { marked } from 'marked';
+import 'katex/dist/katex.min.css';
 
 import { useChatStore } from '@/store/chatStore';
 import { perfMark } from '@/utils/perf';
@@ -41,6 +40,7 @@ import {
   type ChatMessage,
   type ConversationMeta,
 } from '@/services/chat/persistence';
+import { renderChatMarkdown } from '@/services/chat/markdown';
 import ModelSelector from './ModelSelector';
 import InspectOverlay, { type InspectData } from './InspectOverlay';
 
@@ -50,6 +50,20 @@ const SMOKE_RESUME_KEY = 'marginalia-smoke-resume';
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
 }
+
+/**
+ * One answer, rendered once. Without the memo every streamed chunk rendered
+ * the whole transcript again, formulas included.
+ */
+const ChatMarkdown = React.memo(function ChatMarkdown({ content }: { content: string }) {
+  const html = useMemo(() => renderChatMarkdown(content), [content]);
+  return (
+    <div
+      className='chat-markdown prose prose-sm max-w-none'
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+});
 
 const ChatPanel: React.FC = () => {
   const {
@@ -70,7 +84,6 @@ const ChatPanel: React.FC = () => {
     setPinned,
     setPanelWidth,
     removeSelection,
-    clearSelections,
     setConversationId,
     setWebSearchEnabled,
   } = useChatStore();
@@ -174,6 +187,18 @@ const ChatPanel: React.FC = () => {
   const engineSignature = useRef('');
   const accumulated = useRef('');
   const chapterSentFor = useRef('');
+  /**
+   * The debounced save still waiting to run, if any. Leaving a conversation
+   * runs it at once: cancelled, it lost the answer that had just arrived when
+   * the reader opened a new conversation within half a second.
+   */
+  const pendingSave = useRef<(() => void) | null>(null);
+  /** A turn is being prepared: set before the first await of a send. */
+  const sending = useRef(false);
+  const flushPendingSave = () => {
+    const save = pendingSave.current;
+    if (save) save();
+  };
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const currentBookHash = useRef<string>('');
@@ -213,6 +238,7 @@ const ChatPanel: React.FC = () => {
     if (!sideBarBookKey) return;
     const hash = sideBarBookKey.split('-')[0] || '';
     if (!hash || hash === currentBookHash.current) return;
+    flushPendingSave();
     currentBookHash.current = hash;
     useChatStore.getState().setBookHash(hash);
     void stopEngine();
@@ -250,6 +276,9 @@ const ChatPanel: React.FC = () => {
     messagesRef.current = messages;
   }, [messages]);
 
+  // Leaving the reader within half a second of an answer must not lose it.
+  useEffect(() => () => flushPendingSave(), []);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingContent]);
@@ -275,7 +304,10 @@ const ChatPanel: React.FC = () => {
   useEffect(() => {
     if (messages.length === 0 || !bookHash || !conversationId) return;
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-    saveTimeoutRef.current = setTimeout(() => {
+    const save = () => {
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+      pendingSave.current = null;
       saveMessages(bookHash, conversationId, messages).catch(() => {});
       const known = conversationsRef.current.find((c) => c.id === conversationId);
       // Keep the recorded session id when this run has not started an engine
@@ -294,7 +326,9 @@ const ChatPanel: React.FC = () => {
       conversationsRef.current = updated;
       setConversations(updated);
       saveConversationIndex(bookHash, updated).catch(() => {});
-    }, 500);
+    };
+    pendingSave.current = save;
+    saveTimeoutRef.current = setTimeout(save, 500);
     return () => {
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     };
@@ -494,9 +528,28 @@ const ChatPanel: React.FC = () => {
   const willIncludeChapter =
     currentChapterText.trim().length > 0 && chapterKey !== chapterSentFor.current;
 
-  const handleSend = async () => {
-    const text = input.trim();
-    if ((!text && pendingSelections.length === 0) || isStreaming) return;
+  /**
+   * Send a turn. `question` comes from the page (Ctrl+E) and is sent as is;
+   * the draft in the input box is left alone then.
+   */
+  const handleSend = async (question?: string) => {
+    const fromPage = question !== undefined;
+    const text = (question ?? input).trim();
+    // The store, not this render: Ctrl+E adds the selection and asks at once.
+    if (!text && useChatStore.getState().pendingSelections.length === 0) return;
+    // Taken before the first await: the chapter wait and the engine start can
+    // last two seconds, and Enter pressed meanwhile sent the turn twice, with
+    // two processes answering into the same bubble.
+    if (isStreaming || sending.current) return;
+    sending.current = true;
+    try {
+      await sendTurn(text, fromPage);
+    } finally {
+      sending.current = false;
+    }
+  };
+
+  const sendTurn = async (text: string, fromPage: boolean) => {
 
     // The chapter is extracted lazily; ask for it now and give it a moment,
     // so the very first question of a session is not sent without it.
@@ -514,24 +567,34 @@ const ChatPanel: React.FC = () => {
 
     const engine = await ensureEngine();
     if (!engine) return;
+    // What the model gets is what the transcript shows, even if another
+    // selection arrived while the engine was starting.
+    const selections = context.selections;
     const userMsg: ChatMessage = {
       role: 'user',
       content: text || 'Explique ce passage.',
       timestamp: Date.now(),
-      ...(pendingSelections[0]
+      ...(selections[0]
         ? {
             selection: {
-              text: pendingSelections.map((s) => s.text).join('\n\n— — —\n\n'),
-              chapter: pendingSelections[0].location ?? currentChapter,
+              text: selections.map((s) => s.text).join('\n\n— — —\n\n'),
+              chapter: selections[0].location ?? currentChapter,
+              ...(selections.some((s) => s.imageBase64)
+                ? { images: selections.flatMap((s) => (s.imageBase64 ? [s.imageBase64] : [])) }
+                : {}),
             },
           }
         : {}),
     };
 
     setMessages((prev) => [...prev, userMsg]);
-    setInput('');
-    if (inputRef.current) inputRef.current.style.height = 'auto';
-    clearSelections();
+    if (!fromPage) {
+      setInput('');
+      if (inputRef.current) inputRef.current.style.height = 'auto';
+    }
+    useChatStore.setState((s) => ({
+      pendingSelections: s.pendingSelections.filter((p) => !selections.includes(p)),
+    }));
     setIsStreaming(true);
     setStreamingContent('');
     accumulated.current = '';
@@ -565,18 +628,23 @@ const ChatPanel: React.FC = () => {
     setError(null);
   };
 
-  const handleNewConversation = () => void resetConversation(generateId());
+  const handleNewConversation = async () => {
+    flushPendingSave();
+    await resetConversation(generateId());
+  };
 
   const handleDeleteConversation = async () => {
     if (bookHash && conversationId) {
+      // Cancelled before anything is awaited: the debounced save firing
+      // during the deletion wrote the conversation back.
+      messagesRef.current = [];
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+      pendingSave.current = null;
       await deleteConversation(bookHash, conversationId);
       const updated = conversationsRef.current.filter((c) => c.id !== conversationId);
       conversationsRef.current = updated;
       setConversations(updated);
       await saveConversationIndex(bookHash, updated).catch(() => {});
-      // The debounced save must not resurrect it from a stale transcript.
-      messagesRef.current = [];
-      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     }
     await resetConversation(generateId());
   };
@@ -590,6 +658,7 @@ const ChatPanel: React.FC = () => {
 
   const handleSwitchConversation = async (id: string) => {
     if (id === conversationId) return;
+    flushPendingSave();
     await stopEngine();
     setConversationId(id);
     setMessages(await loadMessages(bookHash, id));
@@ -648,8 +717,26 @@ const ChatPanel: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookHash, currentChapter]);
 
-  const handleSendRef = useRef<(() => Promise<void>) | null>(null);
+  const handleSendRef = useRef<((question?: string) => Promise<void>) | null>(null);
   handleSendRef.current = handleSend;
+
+  /**
+   * A question asked from the page (Ctrl+E). Sent at once; while an answer is
+   * still streaming it waits in the input box instead, with its selection
+   * pending, since one process cannot take two turns at a time. Consumed, so a
+   * remounted panel never sends it twice.
+   */
+  const askRequest = useChatStore((s) => s.askRequest);
+  useEffect(() => {
+    if (!askRequest) return;
+    useChatStore.setState({ askRequest: null });
+    if (isStreaming || sending.current) {
+      setInput((current) => current || askRequest.question);
+      return;
+    }
+    void handleSendRef.current?.(askRequest.question);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [askRequest]);
 
   /**
    * Runs one step of a scripted smoke scenario. Steps are separated by "|" in
@@ -673,7 +760,7 @@ const ChatPanel: React.FC = () => {
     const next = () => setTimeout(() => void runSmokeStepRef.current?.(), 400);
 
     if (step === 'newconv') {
-      await resetConversation(generateId());
+      await handleNewConversation();
       next();
       return;
     }
@@ -719,11 +806,6 @@ const ChatPanel: React.FC = () => {
     }, 200);
   };
   runSmokeStepRef.current = runSmokeStep;
-
-  const renderMarkdown = (content: string) => {
-    const html = marked.parse(content, { async: false }) as string;
-    return DOMPurify.sanitize(html);
-  };
 
   const inspectData = (): InspectData => {
     const context = buildContext();
@@ -771,7 +853,7 @@ const ChatPanel: React.FC = () => {
         </button>
         <button
           className='btn btn-ghost btn-xs btn-square'
-          onClick={handleNewConversation}
+          onClick={() => void handleNewConversation()}
           title='Nouvelle conversation'
         >
           <FiPlus size={14} />
@@ -838,7 +920,25 @@ const ChatPanel: React.FC = () => {
             >
               {msg.role === 'user' ? (
                 <div>
-                  {msg.selection && (
+                  {msg.selection?.images?.length ? (
+                    <div className='mb-2 flex flex-col gap-1.5'>
+                      {msg.selection.images.map((image, k) => (
+                        <img
+                          key={k}
+                          src={`data:image/png;base64,${image}`}
+                          alt={`Passage ${k + 1}`}
+                          // Rendered at 3 px per point: shown about the size
+                          // it has on the page, not stretched to the bubble.
+                          onLoad={(e) => {
+                            const img = e.currentTarget;
+                            img.style.width = `${Math.round(img.naturalWidth * 0.45)}px`;
+                          }}
+                          className='max-w-full rounded bg-white p-1'
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                  {msg.selection && !msg.selection.images?.length && (
                     <div className='mb-2 line-clamp-3 border-l-2 border-white/40 pl-2 text-xs italic opacity-80'>
                       &ldquo;{msg.selection.text}&rdquo;
                       {msg.selection.chapter && (
@@ -851,10 +951,7 @@ const ChatPanel: React.FC = () => {
                   <span className='whitespace-pre-wrap'>{msg.content}</span>
                 </div>
               ) : (
-                <div
-                  className='prose prose-sm max-w-none'
-                  dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
-                />
+                <ChatMarkdown content={msg.content} />
               )}
             </div>
           </div>
@@ -862,10 +959,7 @@ const ChatPanel: React.FC = () => {
         {streamingContent && (
           <div className='chat chat-start'>
             <div className='chat-bubble bg-base-200 text-base-content text-sm'>
-              <div
-                className='prose prose-sm max-w-none'
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(streamingContent) }}
-              />
+              <ChatMarkdown content={streamingContent} />
             </div>
           </div>
         )}
@@ -896,13 +990,32 @@ const ChatPanel: React.FC = () => {
               {/* The passage as it will be sent, in full: what the model reads
                   is not always what the page shows, and it has to be checkable
                   before sending. */}
-              <details className='flex-1'>
+              {selection.imageBase64 && (
+                <img
+                  src={`data:image/png;base64,${selection.imageBase64}`}
+                  alt={selection.location || 'Passage'}
+                  className='border-base-300 h-10 max-w-[96px] shrink-0 rounded border bg-white object-contain'
+                />
+              )}
+              <details className='min-w-0 flex-1'>
                 <summary
                   className='text-base-content/70 line-clamp-2 cursor-pointer text-xs italic'
                   title='Afficher toute la sélection'
                 >
-                  &ldquo;{selection.text}&rdquo;
+                  {selection.imageBase64 ? (
+                    <span className='not-italic'>
+                      {selection.location?.split(' · ').slice(-2).join(' · ') || 'Image'} · image
+                      + texte
+                    </span>
+                  ) : (
+                    <>&ldquo;{selection.text}&rdquo;</>
+                  )}
                 </summary>
+                {selection.imageBase64 && (
+                  <div className='text-base-content/50 mt-1 text-[10px]'>
+                    Texte extrait du PDF, en secours : l&rsquo;image fait foi.
+                  </div>
+                )}
                 <div className='text-base-content/70 mt-1 max-h-40 overflow-y-auto text-xs whitespace-pre-wrap select-text'>
                   {selection.text}
                 </div>

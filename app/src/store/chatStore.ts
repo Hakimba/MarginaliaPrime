@@ -27,6 +27,12 @@ interface ChatState {
    * reader next goes idle. The viewer owns the extraction and watches this.
    */
   chapterRequest: number;
+  /**
+   * A question to send right away, with the pending selections: the reader
+   * asked from the page (Ctrl+E) rather than from the panel. `seq` tells two
+   * identical requests apart.
+   */
+  askRequest: { question: string; seq: number } | null;
 
   conversationId: string;
 
@@ -45,6 +51,7 @@ interface ChatState {
   updateBookContext: (title: string, author: string, chapter: string, chapterText: string) => void;
   setPosition: (position: string) => void;
   requestChapter: () => void;
+  requestAsk: (question: string) => void;
   setBookHash: (hash: string) => void;
   setConversationId: (id: string) => void;
   setModel: (backendId: string, modelId: string) => void;
@@ -72,6 +79,7 @@ export const useChatStore = create<ChatState>()(
       currentChapterText: '',
       position: '',
       chapterRequest: 0,
+      askRequest: null,
 
       conversationId: generateId(),
 
@@ -97,6 +105,8 @@ export const useChatStore = create<ChatState>()(
         }),
       setPosition: (position) => set({ position }),
       requestChapter: () => set((s) => ({ chapterRequest: s.chapterRequest + 1 })),
+      requestAsk: (question) =>
+        set((s) => ({ askRequest: { question, seq: (s.askRequest?.seq ?? 0) + 1 } })),
       setBookHash: (hash) => set({ bookHash: hash }),
       setConversationId: (id) => set({ conversationId: id }),
       setModel: (backendId, modelId) => set({ backendId, modelId }),

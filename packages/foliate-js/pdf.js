@@ -3,6 +3,7 @@ const pdfjsPath = path => `/vendor/pdfjs/${path}`
 import { applyReadingOrder, clampSelectionToZone, orderItems, lineToText, groupMarginNotes }
     from './pdf-text-order.js'
 import { installGeometrySelection } from './pdf-selection.js'
+import { detectFormulas } from './pdf-formulas.js'
 
 import '@pdfjs/pdf.min.mjs'
 const pdfjsLib = globalThis.pdfjsLib
@@ -22,6 +23,78 @@ const readTextItems = async page => {
         if (value?.items) items.push(...value.items)
     }
     return items
+}
+
+/** Display formulas found on a page, kept as long as pdf.js keeps the page. */
+const formulaCache = new WeakMap()
+
+/**
+ * Find the display formulas of a rendered page and hand them to the reader.
+ *
+ * Idle work, after the page is on screen: the text is read a second time
+ * (the text layer does not keep it) together with the real font names, which
+ * only exist once rendering has loaded the fonts. Pages met again reuse the
+ * result. The iframe document is told with a `pdf-formulas` event and keeps
+ * the last result in `__pdfFormulas` for listeners that arrive later.
+ */
+const scheduleFormulas = (page, doc, generation) => {
+    const run = async () => {
+        if (!doc.defaultView || renderGenerations.get(doc) !== generation) return
+        let zones = formulaCache.get(page)
+        if (!zones) {
+            const start = performance.now()
+            try {
+                // A turned page would need turned glyph boxes: left alone.
+                if (page.rotate % 360) throw new Error('rotated page')
+                const viewport = page.getViewport({ scale: 1 })
+                const names = new Map()
+                const fontOf = id => {
+                    if (!names.has(id)) {
+                        let name = ''
+                        try {
+                            if (page.commonObjs.has(id)) name = page.commonObjs.get(id)?.name ?? ''
+                        } catch { /* a font that failed to load has no name */ }
+                        names.set(id, name)
+                    }
+                    return names.get(id)
+                }
+                const items = (await readTextItems(page))
+                    .filter(item => typeof item.str === 'string')
+                    .map(item => {
+                        // Through the viewport: a page whose box does not
+                        // start at the origin (cropped PDFs) is offset.
+                        const [x, y] = viewport.convertToViewportPoint(
+                            item.transform[4], item.transform[5])
+                        return {
+                            x, y,
+                            w: item.width,
+                            h: item.height,
+                            rot: Math.round(
+                                Math.atan2(item.transform[1], item.transform[0]) * 180 / Math.PI),
+                            str: item.str,
+                            font: fontOf(item.fontName),
+                        }
+                    })
+                zones = detectFormulas(items, viewport.width)
+            } catch (e) {
+                if (e?.message !== 'rotated page') {
+                    console.error('pdf: formula detection failed on page', page.pageNumber, e)
+                }
+                zones = []
+            }
+            formulaCache.set(page, zones)
+            globalThis.__perfMark?.('pdf:formulas', {
+                page: page.pageNumber, count: zones.length,
+                dur: Math.round((performance.now() - start) * 10) / 10,
+            })
+        }
+        if (!doc.defaultView || renderGenerations.get(doc) !== generation) return
+        doc.__pdfFormulas = { page: page.pageNumber, zones }
+        doc.dispatchEvent(new CustomEvent('pdf-formulas', { detail: doc.__pdfFormulas }))
+    }
+    const idle = globalThis.requestIdleCallback
+    if (typeof idle === 'function') idle(() => void run(), { timeout: 2000 })
+    else setTimeout(() => void run(), 300)
 }
 
 let textLayerBuilderCSS = null
@@ -275,6 +348,8 @@ const render = async (page, doc, zoom) => {
     await new pdfjsLib.AnnotationLayer({ page, viewport, div, linkService }).render({
         annotations: await page.getAnnotations(),
     })
+
+    scheduleFormulas(page, doc, generation)
 }
 
 const renderPage = async (page, getImageBlob) => {
@@ -426,6 +501,33 @@ export const makePDF = async file => {
 
         return page
     }
+    /**
+     * A region of a page as a PNG, base64 without the `data:` prefix: what the
+     * chat sends the model for a formula. Rendered off screen at its own scale
+     * rather than copied from the page on screen, whose resolution follows the
+     * window. `rect` is in PDF points, top-left origin.
+     */
+    book.renderRegion = async (index, rect, scale = 3) => {
+        const page = await getPage(index)
+        // A zone as large as the page stays a few hundred kilobytes: the image
+        // is sent and kept with the conversation.
+        const maxSide = 1400
+        const k = Math.min(scale, maxSide / Math.max(rect.w, rect.h, 1))
+        const viewport = page.getViewport({ scale: k, offsetX: -rect.x * k, offsetY: -rect.y * k })
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.ceil(rect.w * k))
+        canvas.height = Math.max(1, Math.ceil(rect.h * k))
+        const canvasContext = canvas.getContext('2d')
+        try {
+            await page.render({ canvasContext, viewport, background: '#ffffff' }).promise
+            const url = canvas.toDataURL('image/png')
+            return url.slice(url.indexOf(',') + 1)
+        } finally {
+            canvas.width = 0
+            canvas.height = 0
+        }
+    }
+
     book.sections = Array.from({ length: pdf.numPages }).map((_, i) => ({
         id: i,
         load: async () => {

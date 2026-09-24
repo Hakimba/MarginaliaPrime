@@ -733,3 +733,44 @@ html[data-nav-direction='back'] ::view-transition-new(root) {
     }
   }
 }
+
+/* Mathematics in chat answers (KaTeX). */
+.chat-panel .chat-start {
+  /* daisyUI's `auto 1fr` lets the bubble's column grow to the width of its
+     widest formula, which pushed the whole answer past the panel's edge.
+     With a zero minimum the column keeps the panel's width and the formula
+     scrolls in its own box instead. */
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.chat-markdown {
+  overflow-wrap: anywhere;
+}
+.chat-markdown .katex {
+  font-size: 1.1em;
+  overflow-wrap: normal;
+}
+.chat-markdown .katex-display {
+  margin: 0.5em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* Room below for GTK's overlay scrollbar, which is drawn over the content
+     and struck the formula through while it scrolled; the top padding keeps
+     tall symbols from being clipped. */
+  padding: 0.2em 0 0.7em;
+}
+.chat-markdown .katex-display > .katex {
+  /* Centred when it fits, starting at the left edge when it scrolls. */
+  display: block;
+  width: max-content;
+  min-width: 100%;
+}
+/* Typography styles for images and SVG must not reach KaTeX's braces. */
+.chat-markdown .katex svg {
+  margin: 0;
+  max-width: none;
+}
+.chat-markdown .katex-error,
+.chat-markdown .math-error {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+}

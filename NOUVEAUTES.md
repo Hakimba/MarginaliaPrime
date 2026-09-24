@@ -21,6 +21,73 @@ il consomme le quota de l'abonnement. Si le binaire `claude` n'est pas dans le `
 
 ---
 
+## Les formules s'affichent comme dans le livre
+
+*(PR #13)*
+
+- **Les mathématiques des réponses sont rendues** (KaTeX) au lieu d'apparaître en LaTeX brut :
+  fractions, sommes, intégrales, matrices, accolades légendées, couleurs, arbres de dérivation.
+- **Tous les délimiteurs sont reconnus** : `$…$` et `$$…$$`, mais aussi `\(…\)` et `\[…\]`, que
+  Claude emploie souvent. La typographie française ne les casse pas : « (où $x$) », « l'$x$ »,
+  « $x$ ; » sont rendus. Un prix (« 5$ et 10$ ») et le contenu des blocs de code restent du texte.
+- **Une formule trop large défile dans sa bulle** au lieu d'élargir la réponse au-delà du panneau.
+- **Une formule mal écrite ne casse rien** : sa source s'affiche en rouge, le reste de la réponse
+  est rendu normalement.
+- **Lisible en thème sombre** : les formules prennent la couleur du texte, et les couleurs que le
+  modèle peut employer ont été choisies pour les deux thèmes.
+- **Réponses rendues au fil de l'eau** sans ralentir : chaque formule n'est composée qu'une fois,
+  et le panneau ne recalcule plus toute la conversation à chaque morceau reçu. Le texte d'une
+  réponse se sélectionne et se copie normalement.
+- **Le modèle explique une formule en l'annotant** : chaque terme coloré et légendé sous une
+  accolade (ou numéroté ①, ②…), puis une légende dans les mêmes couleurs, plutôt qu'une liste de
+  morceaux recopiés. Les règles d'inférence et les arbres de dérivation sont écrits en fractions
+  imbriquées, avec le nom de chaque règle en marge. Les constructions que KaTeX ne sait pas rendre
+  (`bussproofs`, `tikz`) lui sont interdites. Ces consignes valent pour les nouvelles
+  conversations.
+- **Ctrl+E explique la sélection tout de suite** : la question « Explique ce passage. » part avec
+  le passage sélectionné, panneau fermé ou ouvert. Si une réponse est encore en cours, la question
+  attend dans le champ de saisie avec sa sélection. `Ctrl+Shift+C` joint toujours la sélection
+  sans rien envoyer.
+- **Une réponse ne peut plus être perdue** en ouvrant une nouvelle conversation (ou en changeant
+  de conversation) juste après son arrivée : l'enregistrement, différé d'une demi-seconde, était
+  annulé au lieu d'être fait.
+
+## Choisir une formule d'un clic
+
+*(PR #13)*
+
+- **Les formules d'une page PDF sont repérées toutes seules** : fractions, intégrales, matrices,
+  systèmes, équations alignées, avec leur numéro « (6.100) ». Sur le livre de maths utilisé pour tester,
+  96 % des équations numérotées sont trouvées. Le repérage se fait une fois la page affichée, au repos :
+  la lecture n'en est pas ralentie.
+- **Au survol d'une formule**, un contour pointillé et une pastille « + » dans la marge. Un clic sur la
+  pastille la choisit (①), un autre sur une deuxième formule l'ajoute (②), même si elles ne sont pas
+  alignées. Plus besoin de viser les morceaux d'une formule à la souris.
+- **La sélection de texte ne change pas** : glisser sur la page sélectionne du texte, un clic tourne la
+  page, formule ou pas. Seule la pastille, dans la marge, choisit.
+- **Une barre en bas de la page** : Ask AI (ou Ctrl+E) pour demander tout de suite, Joindre pour
+  accumuler des formules de plusieurs pages dans la même question, ✕ (ou Échap) pour tout retirer.
+- **Le modèle reçoit l'image de chaque formule**, nette, recadrée depuis le PDF, avec le texte extrait
+  en secours : une intégrale que le texte du PDF donnait « Z ∞ » est lue correctement. Les vignettes
+  s'affichent dans la puce en attente et dans le message, et restent après redémarrage.
+- **Bouton Σ** dans l'en-tête : affiche toutes les formules de la page d'un coup. **Bouton Zone** :
+  trace un rectangle à la main pour ce qui n'a pas été repéré (un graphique, par exemple).
+
+## Une page à la fois, et la page ne se perd plus
+
+*(PR #12)*
+
+- **Un PDF s'ouvre sur une seule page**, lisible, au lieu de deux pages minuscules côte à côte.
+  Idem pour les bandes dessinées (CBZ) et les EPUB à mise en page fixe. Un choix fait
+  explicitement pour un livre reste respecté.
+- **Le menu Vue propose « Une page » et « Deux pages (auto) »**, avec l'option active visible. En
+  mode deux pages, une fenêtre étroite (par exemple avec le chat ouvert) repasse à une page.
+- **Le choix est retenu pour chaque livre**, dès qu'on le fait, et survit au redémarrage.
+- **Passer d'une à deux pages garde la page lue**, qu'elle soit paire ou impaire, y compris en
+  basculant vite ou en revenant du défilement continu : plus de saut ailleurs ni de page blanche.
+- **Pointeur normal aussi dans les EPUB**, sans empêcher la sélection ni changer le curseur des
+  liens.
+
 ## Sélectionner ce qu'on veut dans un PDF
 
 *(PR #11)*
@@ -128,7 +195,6 @@ il consomme le quota de l'abonnement. Si le binaire `claude` n'est pas dans le `
 
 ## Ce qui n'est pas encore fait
 
-- Les formules dans les réponses s'affichent en LaTeX brut, sans rendu mathématique.
 - Sur un PDF, seule la couche texte est envoyée au modèle ; l'image du passage sélectionné suivra,
   ce qui compte pour les formules, les matrices et les symboles mal extraits.
 - On ne peut pas encore mettre deux passages en relation dans la même question.

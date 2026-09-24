@@ -12,6 +12,7 @@ const DEFAULT_SHORTCUTS = {
   onSearchSelection: ['ctrl+f', 'cmd+f'],
   onCopySelection: ['ctrl+c', 'cmd+c'],
   onSendToChat: ['ctrl+shift+c', 'cmd+shift+c'],
+  onExplainSelection: ['ctrl+e', 'cmd+e'],
   onOpenFontLayoutSettings: ['shift+f', 'ctrl+,', 'cmd+,'],
   onOpenCommandPalette: ['ctrl+Shift+p', 'cmd+Shift+p'],
   onOpenBooks: ['ctrl+o'],
