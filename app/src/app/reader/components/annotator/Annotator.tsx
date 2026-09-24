@@ -39,6 +39,7 @@ import AnnotationRangeEditor from './AnnotationRangeEditor';
 import AskAiBubble from './AskAiBubble';
 import useShortcuts from '@/hooks/useShortcuts';
 import { useChatStore } from '@/store/chatStore';
+import { useFormulaStore } from '@/store/formulaStore';
 import ExportMarkdownDialog from './ExportMarkdownDialog';
 
 const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
@@ -690,6 +691,9 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
 
   /** Ctrl+E: attach the selection and ask for an explanation at once. */
   const handleExplainSelection = () => {
+    // Picked formulas take Ctrl+E (FormulaPicker); sending the text selection
+    // too would ask twice.
+    if (useFormulaStore.getState().picks.some((p) => p.bookKey === bookKey)) return;
     if (!selection || !selection.text) return;
     handleSendToChat();
     useChatStore.getState().requestAsk('Explique ce passage.');

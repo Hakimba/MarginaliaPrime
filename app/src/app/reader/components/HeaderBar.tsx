@@ -25,6 +25,7 @@ import SidebarToggler from './SidebarToggler';
 import BookmarkToggler from './BookmarkToggler';
 import NotebookToggler from './NotebookToggler';
 import ChatToggler from './chat/ChatToggler';
+import FormulaTools from './formulas/FormulaTools';
 import SettingsToggler from './SettingsToggler';
 import ViewMenu from './ViewMenu';
 
@@ -269,6 +270,7 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
         <div className='header-tools-end bg-base-100 z-20 ms-auto flex h-full min-w-max items-center gap-x-4 ps-2 max-[350px]:gap-x-2'>
           {!isHeaderCompact && <SettingsToggler bookKey={bookKey} />}
           <NotebookToggler bookKey={bookKey} />
+          <FormulaTools bookKey={bookKey} />
           <ChatToggler />
           <Dropdown
             label={_('View Options')}

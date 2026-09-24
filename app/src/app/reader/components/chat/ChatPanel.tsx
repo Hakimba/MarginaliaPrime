@@ -579,6 +579,9 @@ const ChatPanel: React.FC = () => {
             selection: {
               text: selections.map((s) => s.text).join('\n\n— — —\n\n'),
               chapter: selections[0].location ?? currentChapter,
+              ...(selections.some((s) => s.imageBase64)
+                ? { images: selections.flatMap((s) => (s.imageBase64 ? [s.imageBase64] : [])) }
+                : {}),
             },
           }
         : {}),
@@ -917,7 +920,25 @@ const ChatPanel: React.FC = () => {
             >
               {msg.role === 'user' ? (
                 <div>
-                  {msg.selection && (
+                  {msg.selection?.images?.length ? (
+                    <div className='mb-2 flex flex-col gap-1.5'>
+                      {msg.selection.images.map((image, k) => (
+                        <img
+                          key={k}
+                          src={`data:image/png;base64,${image}`}
+                          alt={`Passage ${k + 1}`}
+                          // Rendered at 3 px per point: shown about the size
+                          // it has on the page, not stretched to the bubble.
+                          onLoad={(e) => {
+                            const img = e.currentTarget;
+                            img.style.width = `${Math.round(img.naturalWidth * 0.45)}px`;
+                          }}
+                          className='max-w-full rounded bg-white p-1'
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                  {msg.selection && !msg.selection.images?.length && (
                     <div className='mb-2 line-clamp-3 border-l-2 border-white/40 pl-2 text-xs italic opacity-80'>
                       &ldquo;{msg.selection.text}&rdquo;
                       {msg.selection.chapter && (
@@ -969,13 +990,32 @@ const ChatPanel: React.FC = () => {
               {/* The passage as it will be sent, in full: what the model reads
                   is not always what the page shows, and it has to be checkable
                   before sending. */}
-              <details className='flex-1'>
+              {selection.imageBase64 && (
+                <img
+                  src={`data:image/png;base64,${selection.imageBase64}`}
+                  alt={selection.location || 'Passage'}
+                  className='border-base-300 h-10 max-w-[96px] shrink-0 rounded border bg-white object-contain'
+                />
+              )}
+              <details className='min-w-0 flex-1'>
                 <summary
                   className='text-base-content/70 line-clamp-2 cursor-pointer text-xs italic'
                   title='Afficher toute la sélection'
                 >
-                  &ldquo;{selection.text}&rdquo;
+                  {selection.imageBase64 ? (
+                    <span className='not-italic'>
+                      {selection.location?.split(' · ').slice(-2).join(' · ') || 'Image'} · image
+                      + texte
+                    </span>
+                  ) : (
+                    <>&ldquo;{selection.text}&rdquo;</>
+                  )}
                 </summary>
+                {selection.imageBase64 && (
+                  <div className='text-base-content/50 mt-1 text-[10px]'>
+                    Texte extrait du PDF, en secours : l&rsquo;image fait foi.
+                  </div>
+                )}
                 <div className='text-base-content/70 mt-1 max-h-40 overflow-y-auto text-xs whitespace-pre-wrap select-text'>
                   {selection.text}
                 </div>

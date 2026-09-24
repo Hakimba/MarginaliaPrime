@@ -19,6 +19,8 @@ interface ChatMessage {
   selection?: {
     text: string;
     chapter: string;
+    /** PNG images of the passages (formulas picked on a PDF page), base64. */
+    images?: string[];
   };
 }
 

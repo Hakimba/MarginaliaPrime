@@ -52,6 +52,27 @@ il consomme le quota de l'abonnement. Si le binaire `claude` n'est pas dans le `
   de conversation) juste après son arrivée : l'enregistrement, différé d'une demi-seconde, était
   annulé au lieu d'être fait.
 
+## Choisir une formule d'un clic
+
+*(PR #13)*
+
+- **Les formules d'une page PDF sont repérées toutes seules** : fractions, intégrales, matrices,
+  systèmes, équations alignées, avec leur numéro « (6.100) ». Sur le livre de maths utilisé pour tester,
+  96 % des équations numérotées sont trouvées. Le repérage se fait une fois la page affichée, au repos :
+  la lecture n'en est pas ralentie.
+- **Au survol d'une formule**, un contour pointillé et une pastille « + » dans la marge. Un clic sur la
+  pastille la choisit (①), un autre sur une deuxième formule l'ajoute (②), même si elles ne sont pas
+  alignées. Plus besoin de viser les morceaux d'une formule à la souris.
+- **La sélection de texte ne change pas** : glisser sur la page sélectionne du texte, un clic tourne la
+  page, formule ou pas. Seule la pastille, dans la marge, choisit.
+- **Une barre en bas de la page** : Ask AI (ou Ctrl+E) pour demander tout de suite, Joindre pour
+  accumuler des formules de plusieurs pages dans la même question, ✕ (ou Échap) pour tout retirer.
+- **Le modèle reçoit l'image de chaque formule**, nette, recadrée depuis le PDF, avec le texte extrait
+  en secours : une intégrale que le texte du PDF donnait « Z ∞ » est lue correctement. Les vignettes
+  s'affichent dans la puce en attente et dans le message, et restent après redémarrage.
+- **Bouton Σ** dans l'en-tête : affiche toutes les formules de la page d'un coup. **Bouton Zone** :
+  trace un rectangle à la main pour ce qui n'a pas été repéré (un graphique, par exemple).
+
 ## Une page à la fois, et la page ne se perd plus
 
 *(PR #12)*
