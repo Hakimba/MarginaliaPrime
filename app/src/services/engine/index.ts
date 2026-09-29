@@ -1,4 +1,6 @@
 export type {
+  ContextPage,
+  ContextPlan,
   Engine,
   EngineContext,
   EngineEvent,
@@ -9,6 +11,12 @@ export type {
   EngineUsage,
 } from './types';
 export { ClaudeCliEngine, buildCliArgs, claudeBinaryInfo } from './claudeCliEngine';
-export { buildHarness, buildTurnMessage, buildTurnText } from './harness';
+export {
+  buildHarness,
+  buildTurnMessage,
+  buildTurnText,
+  pageRanges,
+  planContext,
+} from './harness';
 export { parseCliEvent, parseCliLine } from './parseCliEvent';
 export { ENGINE_BACKENDS, DEFAULT_BACKEND_ID, DEFAULT_MODEL_ID, findModel } from './catalog';

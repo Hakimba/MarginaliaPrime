@@ -19,8 +19,10 @@ interface ChatMessage {
   selection?: {
     text: string;
     chapter: string;
-    /** PNG images of the passages (formulas picked on a PDF page), base64. */
+    /** PNG images of the passages, base64. Older messages only: see `items`. */
     images?: string[];
+    /** Each passage sent, in order, with its image when it had one. */
+    items?: { text: string; location?: string; image?: string }[];
   };
 }
 

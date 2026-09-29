@@ -10,6 +10,12 @@
 #   model:<id>    change model mid-conversation
 #   abort         stop the engine
 #   wait:<ms>     pause
+#   page:<n>      go to page n of a PDF
+#   select:<page>:<start>...<end>
+#                 attach the passage of that page running from <start> to <end>
+#                 (spaces ignored), as Ask AI does; its image is logged in chunks
+#   toggleimg:<k> / remove:<k> / clear
+#                 act on pending passage k, or on all of them
 #
 # Prints the engine events and the scenario trace. Uses the real subscription.
 set -u

@@ -2,10 +2,23 @@ const pdfjsPath = path => `/vendor/pdfjs/${path}`
 
 import { applyReadingOrder, clampSelectionToZone, orderItems, lineToText, groupMarginNotes }
     from './pdf-text-order.js'
+import { fitRows, inkRows } from './pdf-crop-fit.js'
+
 import { installGeometrySelection } from './pdf-selection.js'
 import { detectFormulas } from './pdf-formulas.js'
 
 import '@pdfjs/pdf.min.mjs'
+
+/**
+ * Points drawn above and below a selection's boxes before the fit to the ink:
+ * more than a line, for the limits of an integral or a sum set below it.
+ */
+const FIT_ROOM = 18
+/** Points kept around the ink once fitted. */
+const FIT_PAD = 1.5
+/** How deep into the boxes a band must reach to belong to the passage, in points. */
+const FIT_GUARD = 4
+
 const pdfjsLib = globalThis.pdfjsLib
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsPath('pdf.worker.min.mjs')
 
@@ -507,24 +520,52 @@ export const makePDF = async file => {
      * rather than copied from the page on screen, whose resolution follows the
      * window. `rect` is in PDF points, top-left origin.
      */
-    book.renderRegion = async (index, rect, scale = 3) => {
+    book.renderRegion = async (index, rect, scale = 3, { fitLines = false, fitSide = 0 } = {}) => {
         const page = await getPage(index)
+        // `fitLines`: `rect` holds the boxes of a text selection, whose top and
+        // bottom miss the glyphs; draw with room around and cut on the ink.
+        // `fitSide`: points of side margin in `rect`, left out of that reading.
+        const room = fitLines ? FIT_ROOM : 0
+        const pageHeight = page.getViewport({ scale: 1 }).height
+        const top = Math.max(0, rect.y - room)
+        const drawn = { x: rect.x, y: top, w: rect.w, h: Math.min(pageHeight, rect.y + rect.h + room) - top }
         // A zone as large as the page stays a few hundred kilobytes: the image
         // is sent and kept with the conversation.
         const maxSide = 1400
-        const k = Math.min(scale, maxSide / Math.max(rect.w, rect.h, 1))
-        const viewport = page.getViewport({ scale: k, offsetX: -rect.x * k, offsetY: -rect.y * k })
+        const k = Math.min(scale, maxSide / Math.max(drawn.w, drawn.h, 1))
+        const viewport = page.getViewport({ scale: k, offsetX: -drawn.x * k, offsetY: -drawn.y * k })
         const canvas = document.createElement('canvas')
-        canvas.width = Math.max(1, Math.ceil(rect.w * k))
-        canvas.height = Math.max(1, Math.ceil(rect.h * k))
-        const canvasContext = canvas.getContext('2d')
+        canvas.width = Math.max(1, Math.ceil(drawn.w * k))
+        canvas.height = Math.max(1, Math.ceil(drawn.h * k))
+        const canvasContext = canvas.getContext('2d', { willReadFrequently: fitLines })
+        let out = canvas
         try {
             await page.render({ canvasContext, viewport, background: '#ffffff' }).promise
-            const url = canvas.toDataURL('image/png')
+            if (fitLines) {
+                const { data } = canvasContext.getImageData(0, 0, canvas.width, canvas.height)
+                const coreTop = Math.round((rect.y - drawn.y) * k)
+                const coreBottom = Math.round((rect.y + rect.h - drawn.y) * k)
+                // Rows are read over the selected glyphs, not the side margins.
+                const side = Math.round(Math.min(fitSide, rect.w / 4) * k)
+                const ink = inkRows(data, canvas.width, canvas.height, 200, side, canvas.width - side)
+                const rows = fitRows(ink,
+                    coreTop, coreBottom, Math.round(FIT_PAD * k),
+                    Math.round(Math.min(FIT_GUARD, rect.h / 4) * k))
+                    // Nothing recognisable as lines: the boxes, as they are.
+                    ?? { top: coreTop, bottom: coreBottom }
+                out = document.createElement('canvas')
+                out.width = canvas.width
+                out.height = Math.max(1, rows.bottom - rows.top)
+                out.getContext('2d').drawImage(canvas, 0, rows.top, canvas.width, out.height,
+                    0, 0, out.width, out.height)
+            }
+            const url = out.toDataURL('image/png')
             return url.slice(url.indexOf(',') + 1)
         } finally {
             canvas.width = 0
             canvas.height = 0
+            out.width = 0
+            out.height = 0
         }
     }
 

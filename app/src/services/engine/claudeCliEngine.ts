@@ -9,9 +9,10 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-import { buildHarness, buildTurnMessage } from './harness';
+import { buildHarness, buildTurnMessage, chapterKeyOf, planContext } from './harness';
 import { parseCliLine } from './parseCliEvent';
 import type {
+  ContextPlan,
   Engine,
   EngineContext,
   EngineEvent,
@@ -106,6 +107,8 @@ export class ClaudeCliEngine implements Engine {
   private running = false;
   private session: string | null = null;
   private chapterSent = '';
+  /** Pages of a PDF already given to the model by this process. */
+  private pagesSent = new Set<number>();
   private turnCount = 0;
   private resumed = false;
   /** Last lines the CLI wrote to stderr: it explains failures there. */
@@ -134,6 +137,7 @@ export class ClaudeCliEngine implements Engine {
     this.conversationId = options.conversationId;
     this.session = options.resumeSessionId ?? null;
     this.chapterSent = '';
+    this.pagesSent = new Set();
     this.turnCount = 0;
     this.resumed = Boolean(options.resumeSessionId);
     this.stderrTail = [];
@@ -181,11 +185,10 @@ export class ClaudeCliEngine implements Engine {
   async send(text: string, context: EngineContext): Promise<void> {
     if (!this.running) throw new Error('The engine is not running.');
 
-    // The chapter travels once per conversation, and again when it changes.
-    const chapterKey = `${context.chapterTitle}::${context.chapterText.length}`;
-    const includeChapter = context.chapterText.trim().length > 0 && chapterKey !== this.chapterSent;
-
-    const message = buildTurnMessage(text, context, { includeChapter });
+    // The chapter travels once per conversation, and again when it changes;
+    // a page of a PDF travels once.
+    const plan = this.plan(context);
+    const message = buildTurnMessage(text, context, plan);
     try {
       await invoke('engine_send', {
         id: this.conversationId,
@@ -194,8 +197,13 @@ export class ClaudeCliEngine implements Engine {
     } catch (error) {
       throw new Error(messageOf(error));
     }
-    if (includeChapter) this.chapterSent = chapterKey;
+    if (plan.includeChapter) this.chapterSent = chapterKeyOf(context);
+    for (const p of plan.pages) this.pagesSent.add(p.page);
     this.turnCount += 1;
+  }
+
+  plan(context: EngineContext): ContextPlan {
+    return planContext(context, { chapterKey: this.chapterSent, pages: this.pagesSent });
   }
 
   /** Number of turns sent through this process, for diagnostics. */

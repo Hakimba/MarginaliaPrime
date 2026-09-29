@@ -18,12 +18,10 @@ import { useDeviceControlStore } from '@/store/deviceStore';
 import { useFoliateEvents } from '../../hooks/useFoliateEvents';
 import { useTextSelector } from '../../hooks/useTextSelector';
 import {
-  collectPdfLinesAround,
   getPopupPosition,
   getPosition,
   getTextFromRange,
   isPointerOnRange,
-  normalizeSelectedText,
   Point,
   Position,
   TextSelection,
@@ -40,6 +38,7 @@ import AskAiBubble from './AskAiBubble';
 import useShortcuts from '@/hooks/useShortcuts';
 import { useChatStore } from '@/store/chatStore';
 import { useFormulaStore } from '@/store/formulaStore';
+import { attachPassage } from '../../utils/selectionToChat';
 import ExportMarkdownDialog from './ExportMarkdownDialog';
 
 const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
@@ -438,7 +437,7 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
         handleSearch();
         break;
       case 'chat':
-        handleSendToChat();
+        void handleSendToChat();
         break;
     }
   };
@@ -633,70 +632,27 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     eventDispatcher.dispatch('search-term', { term, bookKey });
   };
 
-  const handleSendToChat = () => {
-    if (!selection || !selection.text) return;
+  /** Attach the selection to the chat, with its image on a PDF page. */
+  const sendingToChat = useRef(false);
+  const handleSendToChat = async (): Promise<boolean> => {
+    if (!selection || !selection.text || sendingToChat.current) return false;
+    sendingToChat.current = true;
     setShowAnnotPopup(false);
-
-    const progress = getProgress(bookKey);
-    const chapterTitle = progress?.sectionLabel || '';
-
-    // Get surrounding text from the selection's section
-    let surroundingText = '';
     try {
-      const view = getView(bookKey);
-      if (view && selection.range) {
-        const container = selection.range.commonAncestorContainer;
-        const parentEl =
-          container.nodeType === Node.TEXT_NODE
-            ? container.parentElement
-            : (container as Element);
-        const isPdfPage = !!parentEl?.closest?.('.textLayer');
-        if (parentEl && isPdfPage) {
-          // A PDF page has no paragraphs: spans are siblings, one line ending
-          // at every <br>. Take three lines on each side rather than three
-          // words, which is all the sibling walk below would have found.
-          surroundingText = collectPdfLinesAround(parentEl, 3);
-        } else if (parentEl) {
-          // Get a few sibling paragraphs for context
-          const siblings: string[] = [];
-          let el: Element | null = parentEl;
-          // Go back up to 3 siblings
-          for (let i = 0; i < 3 && el?.previousElementSibling; i++) {
-            el = el.previousElementSibling;
-            siblings.unshift(el.textContent?.trim() || '');
-          }
-          siblings.push(parentEl.textContent?.trim() || '');
-          el = parentEl;
-          // Go forward up to 3 siblings
-          for (let i = 0; i < 3 && el?.nextElementSibling; i++) {
-            el = el.nextElementSibling;
-            siblings.push(el.textContent?.trim() || '');
-          }
-          surroundingText = siblings.filter(Boolean).join('\n\n');
-        }
-      }
-    } catch {
-      // Surrounding text extraction is best-effort
+      const section = getProgress(bookKey)?.sectionLabel || '';
+      return await attachPassage(getView(bookKey), selection, section);
+    } finally {
+      sendingToChat.current = false;
     }
-
-    // The chapter text and the book metadata live in the store already; a
-    // selection only carries what is specific to this passage.
-    useChatStore.getState().addSelection({
-      text: normalizeSelectedText(selection.text),
-      surroundingText: normalizeSelectedText(surroundingText),
-      location: chapterTitle,
-    });
-    useChatStore.getState().setOpen(true);
   };
 
   /** Ctrl+E: attach the selection and ask for an explanation at once. */
-  const handleExplainSelection = () => {
+  const handleExplainSelection = async () => {
     // Picked formulas take Ctrl+E (FormulaPicker); sending the text selection
     // too would ask twice.
     if (useFormulaStore.getState().picks.some((p) => p.bookKey === bookKey)) return;
     if (!selection || !selection.text) return;
-    handleSendToChat();
-    useChatStore.getState().requestAsk('Explique ce passage.');
+    if (await handleSendToChat()) useChatStore.getState().requestAsk('Explique ce passage.');
   };
 
   const handleStartEditAnnotation = useCallback(() => {
@@ -722,13 +678,15 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
         handleCopy(false);
       },
       onSendToChat: () => {
-        handleSendToChat();
+        void handleSendToChat();
       },
       onExplainSelection: () => {
-        handleExplainSelection();
+        void handleExplainSelection();
       },
     },
-    [selection?.text],
+    // The whole selection, not its text: the same word on another page is
+    // another passage, with another page and another image.
+    [selection],
   );
 
   const handleExportMarkdown = async (event: CustomEvent) => {
@@ -809,7 +767,7 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
         <AskAiBubble
           position={annotPopupPosition}
           onAsk={() => {
-            handleSendToChat();
+            void handleSendToChat();
             setShowAnnotPopup(false);
           }}
         />

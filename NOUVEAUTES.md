@@ -21,6 +21,32 @@ il consomme le quota de l'abonnement. Si le binaire `claude` n'est pas dans le `
 
 ---
 
+## Le modèle voit ce que tu vois, et tu vois ce qu'il reçoit
+
+*(PR #14)*
+
+- **Une sélection de texte dans un PDF part avec son image**, comme une formule choisie d'un clic :
+  le modèle lit le passage tel qu'il est imprimé, indices, intégrales et matrices compris, même
+  quand le texte extrait du PDF est illisible (« Z ∞ » pour ∫, règles d'inférence mélangées).
+  L'image est cadrée sur les lignes sélectionnées, sans morceau de la ligne voisine.
+- **Plusieurs passages dans une même question** : chaque « Ask AI » ajoute une puce numérotée
+  ①, ②… avec sa page, son extrait et sa vignette ; la question peut les relier (« compare 1 et 2 »),
+  même s'ils viennent de chapitres différents. Un bouton « Vider » les retire tous, et un même
+  passage ajouté deux fois ne compte qu'une fois.
+- **L'image d'une puce se retire d'un clic** (icône image) pour n'envoyer que le texte, et se
+  remet de même.
+- **Le crop réapparaît au-dessus de sa transcription** dans la réponse (« Transcription 1 »,
+  « Transcription 2 »), pour vérifier la formule contre la page sans remonter la conversation.
+- **Une ligne au-dessus de la saisie dit ce qui part** : page, section, et les pages jointes à la
+  prochaine question (« p. 203–213 jointes », puis « pages déjà transmises »).
+- **Le contexte d'un PDF suit la lecture** : les pages autour de celle qu'on lit (cinq de chaque
+  côté), chacune marquée de son numéro, et chaque page n'est envoyée qu'une fois par conversation.
+  Un PDF sans table des matières a enfin son contexte. La position envoyée au modèle est le vrai
+  numéro de page (« p. 208 / 417 »).
+- **Changer de livre vide les passages en attente**, qui ne partent plus dans la conversation
+  d'un autre livre.
+- **L'aperçu « Voir le contexte envoyé »** montre les images qui partiront et les pages jointes.
+
 ## Les formules s'affichent comme dans le livre
 
 *(PR #13)*

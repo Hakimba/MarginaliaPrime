@@ -2,7 +2,14 @@ import katex from 'katex';
 import { describe, expect, it } from 'vitest';
 
 import { buildCliArgs } from './claudeCliEngine';
-import { ANNOTATED_EXAMPLE, buildHarness, buildTurnMessage, buildTurnText } from './harness';
+import {
+  ANNOTATED_EXAMPLE,
+  buildHarness,
+  buildTurnMessage,
+  buildTurnText,
+  pageRanges,
+  planContext,
+} from './harness';
 import { parseCliLine } from './parseCliEvent';
 import type { EngineContext, EngineStartOptions } from './types';
 
@@ -198,12 +205,12 @@ const context = (over: Partial<EngineContext> = {}): EngineContext => ({
 
 describe('buildTurnText', () => {
   it('includes the chapter only when asked', () => {
-    expect(buildTurnText('Explique', context(), true)).toContain('<current-chapter');
-    expect(buildTurnText('Explique', context(), false)).not.toContain('<current-chapter');
+    expect(buildTurnText('Explique', context(), { includeChapter: true })).toContain('<current-chapter');
+    expect(buildTurnText('Explique', context(), { includeChapter: false })).not.toContain('<current-chapter');
   });
 
   it('always carries the position, the selection and the question', () => {
-    const text = buildTurnText('Explique', context(), false);
+    const text = buildTurnText('Explique', context(), { includeChapter: false });
     expect(text).toContain('<reading-position>');
     expect(text).toContain('p. 202 · 6.5 Gaussian Distribution');
     expect(text).toContain('<selection location="p. 202">');
@@ -217,7 +224,7 @@ describe('buildTurnText', () => {
         { text: 'premier passage', location: 'p. 10' },
         { text: 'second passage', location: 'p. 42' },
       ],
-    }), false);
+    }), { includeChapter: false });
     expect(text).toContain('index="1"');
     expect(text).toContain('index="2"');
     expect(text).toContain('premier passage');
@@ -225,11 +232,11 @@ describe('buildTurnText', () => {
   });
 
   it('falls back to a default question when the reader typed nothing', () => {
-    expect(buildTurnText('   ', context(), false)).toContain('Explique ce passage.');
+    expect(buildTurnText('   ', context(), { includeChapter: false })).toContain('Explique ce passage.');
   });
 
   it('keeps the position on one line and attribute values free of quotes', () => {
-    const text = buildTurnText('q', context({ position: 'p. "2"\n3' }), false);
+    const text = buildTurnText('q', context({ position: 'p. "2"\n3' }), { includeChapter: false });
     // Quotes are legitimate inside a tag body; only attributes replace them.
     expect(text).toContain('<reading-position>\np. "2" 3 · 6.5 Gaussian Distribution\n</reading-position>');
     expect(text).toContain('location="p. 202"');
@@ -238,8 +245,70 @@ describe('buildTurnText', () => {
   it('escapes quotes and newlines inside attributes', () => {
     const text = buildTurnText('q', context({
       selections: [{ text: 'x', location: 'chapitre "6"\nsuite' }],
-    }), false);
+    }), { includeChapter: false });
     expect(text).toContain('location="chapitre \'6\' suite"');
+  });
+});
+
+describe('page window', () => {
+  const pages = [196, 197, 198, 199].map((page) => ({ page, text: `texte de la page ${page}` }));
+
+  it('sends every page of the window at first', () => {
+    const plan = planContext(context({ pages }), { chapterKey: '', pages: new Set() });
+    expect(plan.pages.map((p) => p.page)).toEqual([196, 197, 198, 199]);
+    const text = buildTurnText('q', context({ pages }), plan);
+    expect(text).toContain('<book-pages pages="196–199">');
+    expect(text).toContain('[p. 198]\ntexte de la page 198');
+  });
+
+  it('only sends the pages the model has not seen yet', () => {
+    const plan = planContext(context({ pages }), { chapterKey: '', pages: new Set([196, 197]) });
+    expect(plan.pages.map((p) => p.page)).toEqual([198, 199]);
+    const none = planContext(context({ pages }), {
+      chapterKey: '',
+      pages: new Set([196, 197, 198, 199]),
+    });
+    expect(none.pages).toEqual([]);
+    expect(buildTurnText('q', context({ pages }), none)).not.toContain('<book-pages');
+  });
+
+  it('skips pages with no text', () => {
+    const plan = planContext(context({ pages: [{ page: 3, text: '  ' }] }), {
+      chapterKey: '',
+      pages: new Set(),
+    });
+    expect(plan.pages).toEqual([]);
+  });
+
+  it('writes page ranges compactly', () => {
+    expect(pageRanges([199, 197, 198, 30])).toBe('30, 197–199');
+    expect(pageRanges([5])).toBe('5');
+    expect(pageRanges([])).toBe('');
+  });
+});
+
+describe('composed selections', () => {
+  it('numbers images and selections alike, each with its page', () => {
+    const message = buildTurnMessage(
+      'Compare 1 et 2',
+      context({
+        selections: [
+          { text: 'premier', page: 202, location: '6.5 · p. 202', imageBase64: 'AAAA' },
+          { text: 'second', page: 30, location: '2.2 · p. 30' },
+          { text: 'troisième', page: 31, location: '2.2 · p. 31', imageBase64: 'BBBB' },
+        ],
+      }),
+      { includeChapter: false },
+    );
+    const blocks = message.message.content;
+    expect(blocks.filter((b) => b.type === 'image')).toHaveLength(2);
+    expect(blocks[1]).toEqual({ type: 'text', text: '<selection-image index="1" />' });
+    expect(blocks[3]).toEqual({ type: 'text', text: '<selection-image index="3" />' });
+    const last = blocks.at(-1);
+    const text = last && 'text' in last ? last.text : '';
+    expect(text).toContain('<selection index="1" page="202" location="6.5 · p. 202" image="above">');
+    expect(text).toContain('<selection index="2" page="30" location="2.2 · p. 30">');
+    expect(text).toContain('<selection index="3" page="31"');
   });
 });
 

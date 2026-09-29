@@ -8,14 +8,15 @@ import React, {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import { FiCode, FiGlobe, FiPlus, FiSearch, FiSend, FiTrash2, FiX } from 'react-icons/fi';
+import { FiCode, FiGlobe, FiImage, FiPlus, FiSearch, FiSend, FiTrash2, FiX } from 'react-icons/fi';
 import { BsPin, BsPinFill } from 'react-icons/bs';
 import clsx from 'clsx';
 import 'katex/dist/katex.min.css';
 
-import { useChatStore } from '@/store/chatStore';
+import { useChatStore, type PendingSelection } from '@/store/chatStore';
 import { perfMark } from '@/utils/perf';
 import { useSidebarStore } from '@/store/sidebarStore';
+import { useReaderStore } from '@/store/readerStore';
 
 import {
   ClaudeCliEngine,
@@ -23,8 +24,11 @@ import {
   buildTurnText,
   claudeBinaryInfo,
   findModel,
+  pageRanges,
+  planContext,
 } from '@/services/engine';
 import type {
+  ContextPlan,
   Engine,
   EngineContext,
   EngineEvent,
@@ -41,6 +45,10 @@ import {
   type ConversationMeta,
 } from '@/services/chat/persistence';
 import { renderChatMarkdown } from '@/services/chat/markdown';
+import { splitTranscriptions } from '@/services/chat/transcriptions';
+import { circled } from '../../utils/formulaOverlay';
+import { attachPassage } from '../../utils/selectionToChat';
+import { getTextFromRange } from '@/utils/sel';
 import ModelSelector from './ModelSelector';
 import InspectOverlay, { type InspectData } from './InspectOverlay';
 
@@ -65,6 +73,175 @@ const ChatMarkdown = React.memo(function ChatMarkdown({ content }: { content: st
   );
 });
 
+type SentItem = NonNullable<NonNullable<ChatMessage['selection']>['items']>[number];
+
+/** The passages of a sent message, older messages included (images only). */
+const itemsOf = (message: ChatMessage | undefined): SentItem[] => {
+  const selection = message?.role === 'user' ? message.selection : undefined;
+  if (!selection) return [];
+  if (selection.items) return selection.items;
+  if (selection.images?.length) return selection.images.map((image) => ({ text: '', image }));
+  return [{ text: selection.text, location: selection.chapter }];
+};
+
+/** An image rendered at 3 px per point, shown about the size it has on the page. */
+const PageImage: React.FC<{ image: string; alt: string; className?: string }> = ({
+  image,
+  alt,
+  className,
+}) => (
+  <img
+    src={`data:image/png;base64,${image}`}
+    alt={alt}
+    onLoad={(e) => {
+      const img = e.currentTarget;
+      img.style.width = `${Math.round(img.naturalWidth * 0.45)}px`;
+    }}
+    className={clsx('max-w-full rounded bg-white p-1', className)}
+  />
+);
+
+/**
+ * An answer, with the image of each passage put back above its transcription:
+ * the reader checks the transcription against the page without scrolling up.
+ * An answer without a transcription, or a turn without images, is left as is.
+ */
+const Answer: React.FC<{ content: string; items: SentItem[] }> = ({ content, items }) => {
+  if (!items.some((item) => item.image)) return <ChatMarkdown content={content} />;
+  return (
+    <>
+      {splitTranscriptions(content).map((piece, j) => {
+        const image = piece.passage !== undefined ? items[piece.passage]?.image : undefined;
+        return (
+          <div key={j}>
+            {image && (
+              <PageImage
+                image={image}
+                alt={`Original ${(piece.passage ?? 0) + 1}`}
+                className='border-base-300 mb-1 border'
+              />
+            )}
+            <ChatMarkdown content={piece.content} />
+          </div>
+        );
+      })}
+    </>
+  );
+};
+
+/** The passages a question was sent with, numbered when there were several. */
+const SentPassages: React.FC<{ items: SentItem[] }> = ({ items }) => {
+  if (!items.length) return null;
+  return (
+    <div className='mb-2 flex flex-col gap-1.5'>
+      {items.map((item, k) => (
+        <div key={k} className='flex items-start gap-1.5'>
+          {items.length > 1 && <span className='text-xs leading-5 opacity-80'>{circled(k + 1)}</span>}
+          {item.image ? (
+            <PageImage image={item.image} alt={`Passage ${k + 1}`} />
+          ) : (
+            <div className='line-clamp-3 border-l-2 border-white/40 pl-2 text-xs italic opacity-80'>
+              &ldquo;{item.text}&rdquo;
+              {item.location && (
+                <div className='mt-0.5 text-[10px] not-italic opacity-60'>{item.location}</div>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+/**
+ * Where the reader is, and what of the book the next question takes along:
+ * nothing about the context goes to the model unseen.
+ */
+const ContextLine: React.FC<{
+  position: string;
+  chapter: string;
+  pending: boolean;
+  plan: ContextPlan;
+  hasPages: boolean;
+  hasChapter: boolean;
+}> = ({ position, chapter, pending, plan, hasPages, hasChapter }) => {
+  const sent = plan.pages.length
+    ? `p. ${pageRanges(plan.pages.map((p) => p.page))} jointes`
+    : plan.includeChapter
+      ? 'chapitre joint'
+      : hasPages
+        ? 'pages déjà transmises'
+        : hasChapter
+          ? 'chapitre déjà transmis'
+          : '';
+  const parts = [position, chapter, pending ? 'lecture du contexte…' : sent].filter(Boolean);
+  if (!parts.length) return null;
+  return (
+    <div
+      className='text-base-content/50 border-base-300 truncate border-t px-3 pt-1.5 text-[11px]'
+      title={parts.join(' · ')}
+    >
+      {parts.join(' · ')}
+    </div>
+  );
+};
+
+/**
+ * The range of a page's text layer that reads `wanted`, spaces ignored: what a
+ * scripted scenario selects instead of dragging the mouse.
+ */
+const findPassage = (doc: Document, wanted: string): Range | null => {
+  const layer = doc.querySelector('.textLayer');
+  if (!layer) return null;
+  const target = wanted.replace(/\s+/g, '');
+  const chars: { node: Text; offset: number }[] = [];
+  let flat = '';
+  const walker = doc.createTreeWalker(layer, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
+    const value = node.nodeValue ?? '';
+    for (let i = 0; i < value.length; i += 1) {
+      if (/\s/.test(value[i]!)) continue;
+      chars.push({ node, offset: i });
+      flat += value[i];
+    }
+  }
+  // "start...end": from the first start to the first end after it.
+  const [head = '', tail] = target.split('...');
+  const at = head ? flat.indexOf(head) : -1;
+  if (at < 0) return null;
+  const endAt = tail ? flat.indexOf(tail, at + head.length) : at;
+  if (endAt < 0) return null;
+  const first = chars[at]!;
+  const last = chars[endAt + (tail ?? head).length - 1]!;
+  const range = doc.createRange();
+  range.setStart(first.node, first.offset);
+  range.setEnd(last.node, last.offset + 1);
+  return range;
+};
+
+/** Words of a passage, for the chip. */
+const wordCount = (text: string): number => text.split(/\s+/).filter(Boolean).length;
+
+/** "p. 202 · (6.82) · 6.5 Gaussian Distribution · 34 mots". */
+const chipLabel = (selection: PendingSelection): string =>
+  [
+    selection.page ? `p. ${selection.page}` : '',
+    selection.label,
+    selection.section ?? (selection.page ? '' : selection.location),
+    selection.label ? '' : `${wordCount(selection.text)} mots`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+/** What goes to the engine: the reader's choices applied, the chip's fields dropped. */
+const toEngineSelection = ({ text, surroundingText, location, page, imageBase64, imageOff }: PendingSelection) => ({
+  text,
+  ...(surroundingText ? { surroundingText } : {}),
+  ...(location ? { location } : {}),
+  ...(page ? { page } : {}),
+  ...(imageBase64 && !imageOff ? { imageBase64 } : {}),
+});
+
 const ChatPanel: React.FC = () => {
   const {
     isOpen,
@@ -73,6 +250,9 @@ const ChatPanel: React.FC = () => {
     pendingSelections,
     currentChapter,
     currentChapterText,
+    contextPages,
+    contextPending,
+    position,
     bookTitle,
     bookAuthor,
     bookHash,
@@ -84,6 +264,8 @@ const ChatPanel: React.FC = () => {
     setPinned,
     setPanelWidth,
     removeSelection,
+    toggleSelectionImage,
+    clearSelections,
     setConversationId,
     setWebSearchEnabled,
   } = useChatStore();
@@ -186,7 +368,6 @@ const ChatPanel: React.FC = () => {
   /** Identifies the process configuration; a change means restart. */
   const engineSignature = useRef('');
   const accumulated = useRef('');
-  const chapterSentFor = useRef('');
   /**
    * The debounced save still waiting to run, if any. Leaving a conversation
    * runs it at once: cancelled, it lost the answer that had just arrived when
@@ -228,7 +409,6 @@ const ChatPanel: React.FC = () => {
     const engine = engineRef.current;
     engineRef.current = null;
     engineSignature.current = '';
-    chapterSentFor.current = '';
     setStartInfo(null);
     if (engine) await engine.abort();
   }, []);
@@ -241,6 +421,8 @@ const ChatPanel: React.FC = () => {
     flushPendingSave();
     currentBookHash.current = hash;
     useChatStore.getState().setBookHash(hash);
+    // Passages of the previous book would go into this book's conversation.
+    useChatStore.getState().clearSelections();
     void stopEngine();
 
     conversationsReady.current = loadConversationIndex(hash).then((convos) => {
@@ -519,14 +701,25 @@ const ChatPanel: React.FC = () => {
       bookAuthor: s.bookAuthor,
       chapterTitle: s.currentChapter,
       chapterText: s.currentChapterText,
+      pages: s.contextPages,
       position: s.position,
-      selections: s.pendingSelections,
+      selections: s.pendingSelections.map(toEngineSelection),
     };
   }, []);
 
-  const chapterKey = `${currentChapter}::${currentChapterText.length}`;
-  const willIncludeChapter =
-    currentChapterText.trim().length > 0 && chapterKey !== chapterSentFor.current;
+  /**
+   * What the next turn adds besides the question: asked of the running
+   * engine, which knows what it already sent; before it starts, everything.
+   */
+  const nextPlan = (context: EngineContext): ContextPlan => {
+    const engine = engineRef.current;
+    // A process with another configuration is replaced at the next send, and
+    // the new one has sent nothing.
+    const signature = `${backendId}:${model.id}:${webSearchEnabled}:${conversationId}`;
+    return engine?.isRunning() && engineSignature.current === signature
+      ? engine.plan(context)
+      : planContext(context, { chapterKey: '', pages: new Set() });
+  };
 
   /**
    * Send a turn. `question` comes from the page (Ctrl+E) and is sent as is;
@@ -551,16 +744,17 @@ const ChatPanel: React.FC = () => {
 
   const sendTurn = async (text: string, fromPage: boolean) => {
 
-    // The chapter is extracted lazily; ask for it now and give it a moment,
+    // The context is extracted lazily; ask for it now and give it a moment,
     // so the very first question of a session is not sent without it.
-    if (!useChatStore.getState().currentChapterText && useChatStore.getState().currentChapter) {
+    if (useChatStore.getState().contextPending) {
       useChatStore.getState().requestChapter();
-      for (let i = 0; i < 20 && !useChatStore.getState().currentChapterText; i += 1) {
+      for (let i = 0; i < 30 && useChatStore.getState().contextPending; i += 1) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
 
     // Recorded before the engine starts: a failure can arrive immediately.
+    const sentPending = useChatStore.getState().pendingSelections;
     const context = buildContext();
     lastTurn.current = { text, context };
     resumeRetried.current = false;
@@ -570,6 +764,7 @@ const ChatPanel: React.FC = () => {
     // What the model gets is what the transcript shows, even if another
     // selection arrived while the engine was starting.
     const selections = context.selections;
+    const sentIds = new Set(sentPending.map((p) => p.id));
     const userMsg: ChatMessage = {
       role: 'user',
       content: text || 'Explique ce passage.',
@@ -579,9 +774,11 @@ const ChatPanel: React.FC = () => {
             selection: {
               text: selections.map((s) => s.text).join('\n\n— — —\n\n'),
               chapter: selections[0].location ?? currentChapter,
-              ...(selections.some((s) => s.imageBase64)
-                ? { images: selections.flatMap((s) => (s.imageBase64 ? [s.imageBase64] : [])) }
-                : {}),
+              items: selections.map((s) => ({
+                text: s.text,
+                ...(s.location ? { location: s.location } : {}),
+                ...(s.imageBase64 ? { image: s.imageBase64 } : {}),
+              })),
             },
           }
         : {}),
@@ -593,7 +790,7 @@ const ChatPanel: React.FC = () => {
       if (inputRef.current) inputRef.current.style.height = 'auto';
     }
     useChatStore.setState((s) => ({
-      pendingSelections: s.pendingSelections.filter((p) => !selections.includes(p)),
+      pendingSelections: s.pendingSelections.filter((p) => !sentIds.has(p.id)),
     }));
     setIsStreaming(true);
     setStreamingContent('');
@@ -602,7 +799,6 @@ const ChatPanel: React.FC = () => {
 
     try {
       await engine.send(text, context);
-      if (willIncludeChapter) chapterSentFor.current = chapterKey;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setIsStreaming(false);
@@ -674,10 +870,14 @@ const ChatPanel: React.FC = () => {
    * without a human clicking, so a release build can be checked automatically.
    */
   const smokeFired = useRef(false);
+  const smokeChecked = useRef(false);
   const smokeQueue = useRef<string[]>([]);
   const runSmokeStepRef = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
-    if (smokeFired.current || !bookHash || !currentChapter) return;
+    // A PDF without an outline has a position but no chapter.
+    if (smokeFired.current || smokeChecked.current || !bookHash || (!currentChapter && !position)) {
+      return;
+    }
     let cancelled = false;
     void (async () => {
       try {
@@ -685,6 +885,8 @@ const ChatPanel: React.FC = () => {
         const question = await invoke<string>('get_environment_variable', {
           name: 'MARGINALIA_SMOKE_ASK',
         });
+        // Asked once: normal use must not query the environment at every page.
+        if (!question) smokeChecked.current = true;
         if (cancelled || !question || smokeFired.current) return;
         smokeFired.current = true;
         // Steps left over from a scripted book switch take precedence.
@@ -715,7 +917,7 @@ const ChatPanel: React.FC = () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bookHash, currentChapter]);
+  }, [bookHash, currentChapter, position]);
 
   const handleSendRef = useRef<((question?: string) => Promise<void>) | null>(null);
   handleSendRef.current = handleSend;
@@ -745,6 +947,11 @@ const ChatPanel: React.FC = () => {
    *   delete           delete the current conversation
    *   book:<hash>      switch to another book without leaving the app
    *   model:<id>       change model mid-conversation
+   *   page:<n>         go to page n of a PDF (1-based) and let the context follow
+   *   select:<n>:<text> attach the passage of page n that reads <text> (spaces
+   *                    ignored; "a...b" from a to b), through the same path as Ask AI
+   *   toggleimg:<k>    take the image of pending passage k out, or back in
+   *   remove:<k>       remove pending passage k;  clear: remove them all
    *   abort            stop the engine
    *   wait:<ms>        pause
    * Everything else is asked as a question. This is the only way to exercise
@@ -790,6 +997,58 @@ const ChatPanel: React.FC = () => {
       window.location.href = `/reader.html?ids=${step.slice(5)}`;
       return;
     }
+    if (step.startsWith('page:')) {
+      const key = useSidebarStore.getState().sideBarBookKey;
+      const view = key ? useReaderStore.getState().getView(key) : null;
+      // One section per page: the CFI of page n is the n-th spine item.
+      view?.goTo(`epubcfi(/6/${2 * Number(step.slice(5))})`);
+      // The window follows at idle; the next question waits for it anyway.
+      setTimeout(() => void runSmokeStepRef.current?.(), 1500);
+      return;
+    }
+    if (step.startsWith('select:')) {
+      const [, pageText, ...rest] = step.split(':');
+      const key = useSidebarStore.getState().sideBarBookKey;
+      const view = key ? useReaderStore.getState().getView(key) : null;
+      const index = Number(pageText) - 1;
+      const content = view?.renderer.getContents?.().find((c) => c.index === index);
+      const range = content ? findPassage(content.doc, rest.join(':')) : null;
+      if (!range) {
+        const flat = (content?.doc.querySelector('.textLayer')?.textContent ?? '').replace(/\s+/g, '');
+        console.info(`smoke: passage not found on page ${pageText}: ${flat.slice(0, 1500)}`);
+      } else {
+        const text = getTextFromRange(range);
+        const section = key ? (useReaderStore.getState().getProgress(key)?.sectionLabel ?? '') : '';
+        await attachPassage(view, { text, range, index }, section);
+        const added = useChatStore.getState().pendingSelections.at(-1);
+        console.info(
+          `smoke: selected n=${useChatStore.getState().pendingSelections.length} ` +
+            `p. ${added?.page} ${JSON.stringify(added?.text.slice(0, 120))} ` +
+            `image=${added?.imageBase64 ? Math.round(added.imageBase64.length / 1365) + 'KB' : 'none'}`,
+        );
+        // In chunks: the log cuts long lines.
+        const image = added?.imageBase64 ?? '';
+        for (let at = 0; at < image.length; at += 1500) {
+          console.info(`smoke: image ${added?.id} ${image.slice(at, at + 1500)}`);
+        }
+      }
+      next();
+      return;
+    }
+    if (step.startsWith('toggleimg:') || step.startsWith('remove:') || step === 'clear') {
+      const chat = useChatStore.getState();
+      const k = Number(step.split(':')[1]) - 1;
+      if (step === 'clear') chat.clearSelections();
+      else if (step.startsWith('remove:')) chat.removeSelection(k);
+      else if (chat.pendingSelections[k]) chat.toggleSelectionImage(chat.pendingSelections[k]!.id);
+      console.info(
+        `smoke: pending ${JSON.stringify(
+          useChatStore.getState().pendingSelections.map((p) => [p.page, !!p.imageBase64 && !p.imageOff]),
+        )}`,
+      );
+      next();
+      return;
+    }
     if (step.startsWith('model:')) {
       useChatStore.getState().setModel(backendId, step.slice(6));
       next();
@@ -809,13 +1068,15 @@ const ChatPanel: React.FC = () => {
 
   const inspectData = (): InspectData => {
     const context = buildContext();
-    const message = buildTurnMessage(input, context, { includeChapter: willIncludeChapter });
+    const plan = nextPlan(context);
+    const message = buildTurnMessage(input, context, plan);
     return {
       start: startInfo,
       sessionId,
-      nextMessage: buildTurnText(input, context, willIncludeChapter),
-      includesChapter: willIncludeChapter,
-      imageCount: message.message.content.filter((b) => b.type === 'image').length,
+      nextMessage: buildTurnText(input, context, plan),
+      includesChapter: plan.includeChapter,
+      pages: pageRanges(plan.pages.map((p) => p.page)),
+      images: message.message.content.flatMap((b) => (b.type === 'image' ? [b.source.data] : [])),
       lastUsage,
       lastCostUsd,
       rawLines,
@@ -823,6 +1084,8 @@ const ChatPanel: React.FC = () => {
   };
 
   if (!isOpen) return null;
+
+  const contextPlan = nextPlan(buildContext());
 
   return (
     <div
@@ -881,11 +1144,9 @@ const ChatPanel: React.FC = () => {
         </button>
       </div>
 
-      <div className='border-base-300 flex items-center gap-2 border-b px-3 py-1'>
-        {currentChapter && (
-          <span className='text-base-content/50 flex-1 truncate text-xs'>{currentChapter}</span>
-        )}
-        {conversations.length > 1 && (
+      {conversations.length > 1 && (
+        <div className='border-base-300 flex items-center gap-2 border-b px-3 py-1'>
+          <span className='text-base-content/50 flex-1 text-xs'>Conversation</span>
           <select
             className='select select-ghost select-xs max-w-[120px] text-xs'
             value={conversationId}
@@ -899,8 +1160,8 @@ const ChatPanel: React.FC = () => {
                 </option>
               ))}
           </select>
-        )}
-      </div>
+        </div>
+      )}
 
       <div className='flex-1 space-y-3 overflow-y-auto px-3 py-2 select-text'>
         {messages.length === 0 && !streamingContent && (
@@ -920,38 +1181,11 @@ const ChatPanel: React.FC = () => {
             >
               {msg.role === 'user' ? (
                 <div>
-                  {msg.selection?.images?.length ? (
-                    <div className='mb-2 flex flex-col gap-1.5'>
-                      {msg.selection.images.map((image, k) => (
-                        <img
-                          key={k}
-                          src={`data:image/png;base64,${image}`}
-                          alt={`Passage ${k + 1}`}
-                          // Rendered at 3 px per point: shown about the size
-                          // it has on the page, not stretched to the bubble.
-                          onLoad={(e) => {
-                            const img = e.currentTarget;
-                            img.style.width = `${Math.round(img.naturalWidth * 0.45)}px`;
-                          }}
-                          className='max-w-full rounded bg-white p-1'
-                        />
-                      ))}
-                    </div>
-                  ) : null}
-                  {msg.selection && !msg.selection.images?.length && (
-                    <div className='mb-2 line-clamp-3 border-l-2 border-white/40 pl-2 text-xs italic opacity-80'>
-                      &ldquo;{msg.selection.text}&rdquo;
-                      {msg.selection.chapter && (
-                        <div className='mt-0.5 text-[10px] not-italic opacity-60'>
-                          {msg.selection.chapter}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  <SentPassages items={itemsOf(msg)} />
                   <span className='whitespace-pre-wrap'>{msg.content}</span>
                 </div>
               ) : (
-                <ChatMarkdown content={msg.content} />
+                <Answer content={msg.content} items={itemsOf(messages[i - 1])} />
               )}
             </div>
           </div>
@@ -959,7 +1193,7 @@ const ChatPanel: React.FC = () => {
         {streamingContent && (
           <div className='chat chat-start'>
             <div className='chat-bubble bg-base-200 text-base-content text-sm'>
-              <ChatMarkdown content={streamingContent} />
+              <Answer content={streamingContent} items={itemsOf(messages[messages.length - 1])} />
             </div>
           </div>
         )}
@@ -981,11 +1215,27 @@ const ChatPanel: React.FC = () => {
       </div>
 
       {pendingSelections.length > 0 && (
-        <div className='border-base-300 bg-base-200/50 flex flex-col gap-1 border-t px-3 py-2'>
+        <div className='border-base-300 bg-base-200/50 flex max-h-[40%] flex-col gap-1 overflow-y-auto border-t px-3 py-2'>
+          {pendingSelections.length > 1 && (
+            <div className='flex items-center'>
+              <span className='text-base-content/50 flex-1 text-[11px]'>
+                {pendingSelections.length} passages · désigne-les par leur numéro
+              </span>
+              <button
+                className='btn btn-ghost btn-xs h-5 min-h-0 px-1 text-[11px]'
+                onClick={clearSelections}
+                title='Retirer tous les passages'
+              >
+                Vider
+              </button>
+            </div>
+          )}
           {pendingSelections.map((selection, index) => (
-            <div key={index} className='flex items-start gap-2'>
+            <div key={selection.id} className='flex items-start gap-2'>
               {pendingSelections.length > 1 && (
-                <span className='text-base-content/50 shrink-0 text-xs'>{index + 1}.</span>
+                <span className='text-base-content/70 shrink-0 text-sm leading-5'>
+                  {circled(index + 1)}
+                </span>
               )}
               {/* The passage as it will be sent, in full: what the model reads
                   is not always what the page shows, and it has to be checkable
@@ -994,26 +1244,31 @@ const ChatPanel: React.FC = () => {
                 <img
                   src={`data:image/png;base64,${selection.imageBase64}`}
                   alt={selection.location || 'Passage'}
-                  className='border-base-300 h-10 max-w-[96px] shrink-0 rounded border bg-white object-contain'
+                  className={clsx(
+                    'border-base-300 h-10 max-w-[96px] shrink-0 rounded border bg-white object-contain',
+                    selection.imageOff && 'opacity-25 grayscale',
+                  )}
                 />
               )}
               <details className='min-w-0 flex-1'>
                 <summary
-                  className='text-base-content/70 line-clamp-2 cursor-pointer text-xs italic'
+                  className='text-base-content/70 cursor-pointer list-none text-xs'
                   title='Afficher toute la sélection'
                 >
-                  {selection.imageBase64 ? (
-                    <span className='not-italic'>
-                      {selection.location?.split(' · ').slice(-2).join(' · ') || 'Image'} · image
-                      + texte
-                    </span>
-                  ) : (
-                    <>&ldquo;{selection.text}&rdquo;</>
-                  )}
+                  <span className='block truncate'>{chipLabel(selection)}</span>
+                  <span className='text-base-content/50 block truncate italic'>
+                    {selection.label
+                      ? selection.imageBase64 && !selection.imageOff
+                        ? 'image + texte'
+                        : 'texte seul'
+                      : `\u201c${selection.text}\u201d`}
+                  </span>
                 </summary>
                 {selection.imageBase64 && (
                   <div className='text-base-content/50 mt-1 text-[10px]'>
-                    Texte extrait du PDF, en secours : l&rsquo;image fait foi.
+                    {selection.imageOff
+                      ? 'Image retirée : seul le texte extrait partira.'
+                      : 'Texte extrait du PDF, en secours : l\u2019image fait foi.'}
                   </div>
                 )}
                 <div className='text-base-content/70 mt-1 max-h-40 overflow-y-auto text-xs whitespace-pre-wrap select-text'>
@@ -1024,6 +1279,19 @@ const ChatPanel: React.FC = () => {
                   {selection.location ? ` · ${selection.location}` : ''}
                 </div>
               </details>
+              {selection.imageBase64 && (
+                <button
+                  className={clsx(
+                    'btn btn-ghost btn-xs btn-square shrink-0',
+                    selection.imageOff ? 'text-base-content/30' : 'text-primary',
+                  )}
+                  onClick={() => toggleSelectionImage(selection.id)}
+                  title={selection.imageOff ? 'Remettre l\u2019image' : 'Envoyer sans l\u2019image'}
+                  aria-pressed={!selection.imageOff}
+                >
+                  <FiImage size={12} />
+                </button>
+              )}
               <button
                 className='btn btn-ghost btn-xs btn-square shrink-0'
                 onClick={() => removeSelection(index)}
@@ -1036,7 +1304,16 @@ const ChatPanel: React.FC = () => {
         </div>
       )}
 
-      <div className='border-base-300 border-t px-3 py-2'>
+      <ContextLine
+        position={position}
+        chapter={currentChapter}
+        pending={contextPending}
+        plan={contextPlan}
+        hasPages={contextPages.length > 0}
+        hasChapter={currentChapterText.trim().length > 0}
+      />
+
+      <div className='px-3 pt-1 pb-2'>
         <div className='border-base-300 bg-base-100 focus-within:border-primary flex items-center gap-2 rounded-lg border px-2 py-2'>
           <button
             className={clsx(

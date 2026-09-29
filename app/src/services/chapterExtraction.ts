@@ -257,6 +257,31 @@ async function collectSections(bookDoc: BookDoc, first: number, last: number): P
 }
 
 /**
+ * The text of each page from `first` to `last` (section indexes, inclusive),
+ * numbered from 1 as the reader shows them. Pages already in `cache` are not
+ * extracted again: the window moves with the reader and mostly overlaps the
+ * previous one. A page that fails to load is left out.
+ */
+export async function extractPages(
+  bookDoc: BookDoc,
+  first: number,
+  last: number,
+  cache?: Map<number, string>,
+): Promise<{ page: number; text: string }[]> {
+  const pages: { page: number; text: string }[] = [];
+  for (let i = Math.max(0, first); i <= Math.min(last, bookDoc.sections.length - 1); i += 1) {
+    let text = cache?.get(i);
+    if (text === undefined) {
+      text = await collectSections(bookDoc, i, i);
+      // Not remembered when empty: the page may have failed to load.
+      if (text) cache?.set(i, text);
+    }
+    if (text) pages.push({ page: i + 1, text });
+  }
+  return pages;
+}
+
+/**
  * Resolve a TOC href into a section index and optional fragment ID.
  * Handles the async case (PDF) transparently.
  */

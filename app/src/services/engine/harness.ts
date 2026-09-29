@@ -13,7 +13,7 @@
  *    changes) rather than on every turn. The CLI keeps the history, so one copy
  *    stays in the cached prefix.
  */
-import type { EngineContext, EngineSelection } from './types';
+import type { ContextPage, ContextPlan, EngineContext, EngineSelection } from './types';
 
 export interface HarnessOptions {
   bookTitle: string;
@@ -40,14 +40,19 @@ export const buildHarness = ({ bookTitle, bookAuthor, webSearch }: HarnessOption
     '',
     'Ce que tu reçois à chaque message :',
     '- <reading-position> : où en est le lecteur.',
-    '- <selection> : le ou les passages sélectionnés. Plusieurs sélections peuvent être',
-    '  mises en relation par la question.',
+    '- <selection> : le ou les passages sélectionnés, avec leur page pour un PDF. Plusieurs',
+    '  sélections sont numérotées (index) ; le lecteur les désigne par ①, ② ou 1, 2 et peut',
+    '  les mettre en relation dans sa question.',
     '- <selection-image> : pour un PDF, l\'image de la zone sélectionnée. Elle est la',
     '  source de vérité : le texte extrait d\'un PDF perd les indices, les exposants, la',
     '  structure des matrices et certains symboles (∫ devient souvent « Z », ≠ devient',
     '  « ̸ = »). En cas de désaccord entre le texte et l\'image, crois l\'image.',
     '- <current-chapter> : le texte du chapitre courant, envoyé une seule fois par',
     '  conversation. Il reste valable pour les messages suivants.',
+    '- <book-pages> : pour un PDF, le texte des pages autour du lecteur, chaque page',
+    '  précédée de son repère [p. N]. Une page n\'est envoyée qu\'une fois par conversation :',
+    '  celles reçues plus tôt restent valables. Ce texte extrait a les mêmes défauts que',
+    '  celui d\'une sélection.',
     '',
     'Comment répondre :',
     '- En français, sauf demande contraire. Concis. Commence par la réponse elle-même : ni',
@@ -55,7 +60,9 @@ export const buildHarness = ({ bookTitle, bookAuthor, webSearch }: HarnessOption
     '  conclusion de politesse.',
     '- Quand une <selection> contient des mathématiques, commence par une ligne',
     '  « **Transcription** » suivie de la formule transcrite fidèlement, seule entre $$ et $$,',
-    '  sans rien corriger ni simplifier, avant toute explication.',
+    '  sans rien corriger ni simplifier, avant toute explication. Avec plusieurs sélections,',
+    '  une ligne « **Transcription 1** », « **Transcription 2** »… par sélection qui en',
+    '  contient, avec son numéro.',
     '- Pour parler d\'un signe, donne le caractère Unicode exact (« le signe ⊗ ») plutôt',
     '  qu\'une description approximative.',
     '- Respecte les conventions de notation du livre quand tu les connais.',
@@ -103,7 +110,47 @@ export const buildHarness = ({ bookTitle, bookAuthor, webSearch }: HarnessOption
 export interface TurnOptions {
   /** Include the chapter text: first turn, or the chapter changed. */
   includeChapter: boolean;
+  /** Pages to send with this turn: those of the window not sent yet. */
+  pages?: ContextPage[];
 }
+
+/** What the engine has already given the model in this conversation. */
+export interface SentContext {
+  chapterKey: string;
+  pages: Set<number>;
+}
+
+export const chapterKeyOf = (context: EngineContext): string =>
+  `${context.chapterTitle}::${context.chapterText.length}`;
+
+/**
+ * What the next turn adds to the conversation: the chapter when it changed,
+ * and the pages of the window the model has not seen yet.
+ */
+export const planContext = (context: EngineContext, sent: SentContext): ContextPlan => ({
+  includeChapter:
+    context.chapterText.trim().length > 0 && chapterKeyOf(context) !== sent.chapterKey,
+  pages: (context.pages ?? []).filter((p) => p.text.trim() && !sent.pages.has(p.page)),
+});
+
+/** "197–207", or "30, 197–199" for a window with gaps. */
+export const pageRanges = (pages: number[]): string => {
+  const sorted = [...new Set(pages)].sort((a, b) => a - b);
+  const ranges: string[] = [];
+  let start = sorted[0];
+  let prev = sorted[0];
+  for (const n of [...sorted.slice(1), Infinity]) {
+    if (start === undefined || prev === undefined) break;
+    if (n === prev + 1) {
+      prev = n;
+      continue;
+    }
+    ranges.push(start === prev ? `${start}` : `${start}–${prev}`);
+    start = n;
+    prev = n;
+  }
+  return ranges.join(', ');
+};
 
 /** A content block of the CLI's user message. */
 export type TurnBlock =
@@ -119,7 +166,7 @@ export interface TurnMessage {
 export const buildTurnMessage = (
   question: string,
   context: EngineContext,
-  { includeChapter }: TurnOptions,
+  options: TurnOptions,
 ): TurnMessage => {
   const blocks: TurnBlock[] = [];
 
@@ -136,7 +183,7 @@ export const buildTurnMessage = (
     });
   });
 
-  blocks.push({ type: 'text', text: buildTurnText(question, context, includeChapter) });
+  blocks.push({ type: 'text', text: buildTurnText(question, context, options) });
   return { type: 'user', message: { role: 'user', content: blocks } };
 };
 
@@ -144,9 +191,17 @@ export const buildTurnMessage = (
 export const buildTurnText = (
   question: string,
   context: EngineContext,
-  includeChapter: boolean,
+  { includeChapter, pages = [] }: TurnOptions,
 ): string => {
   const parts: string[] = [];
+
+  if (pages.length) {
+    const body = [...pages]
+      .sort((a, b) => a.page - b.page)
+      .map((p) => `[p. ${p.page}]\n${p.text.trim()}`)
+      .join('\n\n');
+    parts.push(tag('book-pages', body, { pages: pageRanges(pages.map((p) => p.page)) }), '');
+  }
 
   if (includeChapter && context.chapterText.trim()) {
     parts.push(
@@ -172,6 +227,7 @@ export const buildTurnText = (
 const selectionBlock = (selection: EngineSelection, index: number, numbered: boolean): string => {
   const attrs: Record<string, string> = {};
   if (numbered) attrs['index'] = String(index);
+  if (selection.page) attrs['page'] = String(selection.page);
   if (selection.location) attrs['location'] = selection.location;
   if (selection.imageBase64) attrs['image'] = 'above';
 
