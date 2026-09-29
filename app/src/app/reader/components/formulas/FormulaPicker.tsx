@@ -157,10 +157,11 @@ const FormulaPicker: React.FC<{ bookKey: string }> = ({ bookKey }) => {
         } catch (e) {
           console.error('formula: image render failed', e);
         }
-        const what = pick.free ? 'zone' : pick.zone.label || 'formule';
         chat.addSelection({
           text: pick.zone.text || '[zone de la page : voir l’image]',
-          location: [chapter, `p. ${pick.index + 1}`, what].filter(Boolean).join(' · '),
+          section: chapter,
+          page: pick.index + 1,
+          label: pick.free ? 'zone' : pick.zone.label || 'formule',
           ...(imageBase64 ? { imageBase64 } : {}),
         });
       }

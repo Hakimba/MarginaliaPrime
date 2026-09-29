@@ -14,8 +14,10 @@ export interface InspectData {
   nextMessage: string;
   /** Whether that message will carry the chapter text. */
   includesChapter: boolean;
-  /** Number of images attached to the next message. */
-  imageCount: number;
+  /** Pages of a PDF that message will carry, e.g. "197–207". */
+  pages: string;
+  /** Images attached to the next message, base64 PNG. */
+  images: string[];
   /** Usage of the last completed turn. */
   lastUsage?: EngineUsage;
   lastCostUsd?: number;
@@ -60,8 +62,9 @@ const InspectOverlay: React.FC<{ data: InspectData; onClose: () => void }> = ({
   data,
   onClose,
 }) => {
-  const { start, sessionId, nextMessage, includesChapter, imageCount, lastUsage, lastCostUsd } =
+  const { start, sessionId, nextMessage, includesChapter, pages, images, lastUsage, lastCostUsd } =
     data;
+  const imageCount = images.length;
 
   return (
     <div className='fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4'>
@@ -106,12 +109,28 @@ const InspectOverlay: React.FC<{ data: InspectData; onClose: () => void }> = ({
           <Section
             title='Prochain message'
             badge={[
-              includesChapter ? 'chapitre inclus' : 'sans chapitre',
+              pages ? `p. ${pages}` : includesChapter ? 'chapitre inclus' : 'sans chapitre',
               imageCount > 0 ? `${imageCount} image${imageCount > 1 ? 's' : ''}` : null,
             ]
               .filter(Boolean)
               .join(' · ')}
           >
+            {images.length > 0 && (
+              <div className='mb-2 flex flex-wrap gap-2'>
+                {images.map((image, k) => (
+                  <figure key={k} className='flex flex-col items-start gap-0.5'>
+                    <img
+                      src={`data:image/png;base64,${image}`}
+                      alt={`Passage ${k + 1}`}
+                      className='border-base-300 max-h-32 max-w-full rounded border bg-white'
+                    />
+                    <figcaption className='text-[10px] opacity-60'>
+                      image {k + 1} · {Math.round((image.length * 3) / 4 / 1024)} Ko
+                    </figcaption>
+                  </figure>
+                ))}
+              </div>
+            )}
             <Pre>{nextMessage || '(vide — sélectionne un passage ou écris une question)'}</Pre>
           </Section>
 

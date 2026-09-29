@@ -13,10 +13,27 @@ export interface EngineSelection {
   text: string;
   /** Text immediately around the selection, when the reader gave us one. */
   surroundingText?: string;
-  /** Human-readable location, e.g. "p. 202" or "6.5 Gaussian Distribution". */
+  /** Human-readable location, e.g. "6.5 Gaussian Distribution · p. 202 · (6.82)". */
   location?: string;
+  /** Page number, 1-based, on a PDF. */
+  page?: number;
   /** PNG of the selected region, base64 without a data: prefix (PDF only). */
   imageBase64?: string;
+}
+
+/** The text of one page of a fixed-layout book, sent as reading context. */
+export interface ContextPage {
+  /** Page number, 1-based, as the reader shows it. */
+  page: number;
+  text: string;
+}
+
+/** What the next turn will carry besides the question and the selections. */
+export interface ContextPlan {
+  /** The chapter text travels (reflowable books). */
+  includeChapter: boolean;
+  /** Pages of the window the model has not been given yet (PDF). */
+  pages: ContextPage[];
 }
 
 /** Everything the model should know about where the reader is right now. */
@@ -26,6 +43,11 @@ export interface EngineContext {
   chapterTitle: string;
   /** Full chapter text; sent once per conversation, not on every turn. */
   chapterText: string;
+  /**
+   * Fixed-layout books: the pages around the reader, instead of a chapter.
+   * Each page travels once per conversation.
+   */
+  pages?: ContextPage[];
   /** e.g. "30 / 417" or a chapter-relative position. */
   position?: string;
   selections: EngineSelection[];
@@ -94,6 +116,8 @@ export interface Engine {
   start(options: EngineStartOptions): Promise<EngineStartInfo>;
   /** Send one turn. Resolves when the turn is accepted, not when it ends. */
   send(text: string, context: EngineContext): Promise<void>;
+  /** What `send` would add to this context, given what was already sent. */
+  plan(context: EngineContext): ContextPlan;
   /** Interrupt the current turn and drop the backend. */
   abort(): Promise<void>;
   /** True while a process is running. */

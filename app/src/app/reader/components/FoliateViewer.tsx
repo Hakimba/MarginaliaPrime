@@ -59,7 +59,11 @@ import { handleA11yNavigation } from '@/utils/a11y';
 import { isCJKLang } from '@/utils/lang';
 import { getLocale } from '@/utils/misc';
 import { isFontType } from '@/utils/font';
-import { extractChapterText, findTopLevelAncestor } from '@/services/chapterExtraction';
+import {
+  extractChapterText,
+  extractPages,
+  findTopLevelAncestor,
+} from '@/services/chapterExtraction';
 import { perfMark, perfSpan } from '@/utils/perf';
 import { useSelectionProbe } from '../hooks/useSelectionProbe';
 import Spinner from '@/components/Spinner';
@@ -71,6 +75,11 @@ declare global {
     eval(script: string): void;
   }
 }
+
+/** Pages on each side of the reader sent as context for a fixed-layout book. */
+const CONTEXT_PAGE_WINDOW = 5;
+/** How far the reader may move from the window's centre before it follows. */
+const CONTEXT_PAGE_RECENTER = 2;
 
 const FoliateViewer: React.FC<{
   bookKey: string;
@@ -114,6 +123,16 @@ const FoliateViewer: React.FC<{
     sectionIdx?: number;
   } | null>(null);
   const chatOpen = useChatStore((s) => s.isOpen);
+  /**
+   * Fixed layout: the page the context window should be centred on, waiting
+   * to be extracted, and the page the current window was centred on. The
+   * window follows the reader, not the table of contents: a PDF may have none,
+   * and one entry of it can span a hundred pages.
+   */
+  const pendingWindow = useRef<number | null>(null);
+  const windowCenter = useRef<number | null>(null);
+  const pageTexts = useRef(new Map<number, string>());
+  const windowRun = useRef(0);
 
   /**
    * Extracting a chapter walks every section of it, which is heavy enough to
@@ -121,7 +140,7 @@ const FoliateViewer: React.FC<{
    * chat panel never costs anything at book-opening time.
    */
   const runChapterExtraction = () => {
-    if (!pendingChapter.current) return;
+    if (!pendingChapter.current && pendingWindow.current === null) return;
     const idle = (window as unknown as { requestIdleCallback?: typeof setTimeout })
       .requestIdleCallback;
     if (typeof idle === 'function') {
@@ -132,24 +151,69 @@ const FoliateViewer: React.FC<{
     }
   };
 
+  const extractPendingWindow = () => {
+    const center = pendingWindow.current;
+    if (center === null) return;
+    pendingWindow.current = null;
+    const run = ++windowRun.current;
+    const first = center - CONTEXT_PAGE_WINDOW;
+    const last = center + CONTEXT_PAGE_WINDOW;
+    const endExtract = perfSpan('context:pages', { first: first + 1, last: last + 1 });
+    const cache = pageTexts.current;
+    extractPages(bookDoc, first, last, cache)
+      .then((pages) => {
+        endExtract({ pages: pages.length, chars: pages.reduce((n, p) => n + p.text.length, 0) });
+        // The reader moved on during the extraction: a newer run owns the store.
+        if (run !== windowRun.current || disposed.current) return;
+        // Pages far behind are dropped; the window never needs them again.
+        for (const key of cache.keys()) {
+          if (Math.abs(key - center) > 4 * CONTEXT_PAGE_WINDOW) cache.delete(key);
+        }
+        useChatStore.getState().setContextPages(pages, bookKey);
+        if (pendingWindow.current === null) useChatStore.getState().setContextPending(false);
+      })
+      .catch((e) => {
+        console.warn('context: page window extraction failed', e);
+        if (run === windowRun.current && !disposed.current) {
+          useChatStore.getState().setContextPending(false);
+        }
+      });
+  };
+
   const extractPendingChapter = () => {
+    extractPendingWindow();
     const pending = pendingChapter.current;
     if (!pending) return;
     pendingChapter.current = null;
     const { tocItem, toc, bookTitle, bookAuthor, chapterTitle, sectionIdx } = pending;
     const endExtract = perfSpan('chapter:extract', { chapter: chapterTitle });
-    // PDF: a page window around the reader. EPUB: the TOC chapter.
-    const pageWindow = bookDoc.rendition?.layout === 'pre-paginated' ? 6 : undefined;
-    extractChapterText(bookDoc, tocItem, toc, {
-      currentSectionIdx: sectionIdx,
-      ...(pageWindow ? { pageWindow } : {}),
-    }).then((text) => {
+    extractChapterText(bookDoc, tocItem, toc, { currentSectionIdx: sectionIdx }).then((text) => {
       endExtract({ chars: text.length });
+      if (disposed.current) return;
       useChatStore.getState().updateBookContext(bookTitle, bookAuthor, chapterTitle, text);
+      if (!pendingChapter.current) useChatStore.getState().setContextPending(false);
     });
   };
 
   const chapterRequest = useChatStore((s) => s.chapterRequest);
+
+  // A book just opened: the context of the previous one is not its own, and an
+  // extraction still running for a closed book must not land in the store.
+  const disposed = useRef(false);
+  useEffect(() => {
+    disposed.current = false;
+    useChatStore.getState().setContextPages([], bookKey);
+    useChatStore.getState().setContextPending(false);
+    return () => {
+      disposed.current = true;
+      windowRun.current += 1;
+      pendingWindow.current = null;
+      pendingChapter.current = null;
+      // Only this book's context: another one open beside it keeps its own.
+      useChatStore.getState().releaseContext(bookKey);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (chatOpen) runChapterExtraction();
@@ -201,14 +265,37 @@ const FoliateViewer: React.FC<{
       const bookAuthor = bookData?.book?.author || '';
 
       // Reading position, sent to the model with every question.
+      // A PDF counts pages; the location counter is in the renderer's own
+      // units (135 / 278 on page 202 of 417).
       const isFixed = bookDoc.rendition?.layout === 'pre-paginated';
+      const pageIndex = (detail.section as PageInfo | undefined)?.current;
       useChatStore
         .getState()
         .setPosition(
-          pageInfo.total > 0
-            ? `${isFixed ? 'p.' : 'page'} ${currentPage + 1} / ${pageInfo.total}`
-            : '',
+          isFixed && pageIndex !== undefined
+            ? `p. ${pageIndex + 1} / ${bookDoc.sections.length}`
+            : pageInfo.total > 0
+              ? `page ${currentPage + 1} / ${pageInfo.total}`
+              : '',
         );
+
+      if (isFixed) {
+        // One section is one page. The window is re-centred once the reader is
+        // a few pages away from its centre, and only the new pages travel.
+        const page = (detail.section as PageInfo | undefined)?.current ?? currentPage;
+        // No chapter text for a fixed-layout book: the pages are the context.
+        useChatStore.getState().updateBookContext(bookTitle, bookAuthor, chapterTitle, '');
+        const center = windowCenter.current;
+        if (center === null || Math.abs(page - center) > CONTEXT_PAGE_RECENTER) {
+          windowCenter.current = page;
+          pendingWindow.current = page;
+          useChatStore.getState().setContextPending(true);
+          if (useChatStore.getState().isOpen) runChapterExtraction();
+        }
+        return;
+      }
+
+      if (useChatStore.getState().contextPages.length) useChatStore.getState().setContextPages([]);
 
       // Resolve to top-level chapter so we cache at chapter granularity,
       // not subsection — navigating between 5.1 and 5.2 won't re-extract
@@ -229,6 +316,7 @@ const FoliateViewer: React.FC<{
           chapterTitle,
           sectionIdx: (detail.section as PageInfo | undefined)?.current,
         };
+        useChatStore.getState().setContextPending(true);
         // Extract now only if the chat is open; otherwise defer until it opens.
         if (useChatStore.getState().isOpen) runChapterExtraction();
       } else if (pendingChapter.current) {
