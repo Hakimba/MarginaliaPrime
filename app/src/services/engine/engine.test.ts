@@ -59,8 +59,22 @@ describe('parseCliLine', () => {
         model: 'claude-haiku-4-5',
         tools: [],
         cwd: '/tmp/clitest',
+        mcpServers: [],
       },
     ]);
+  });
+
+  it('reports whether the reader tools connected', () => {
+    const line = JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      session_id: 's',
+      model: 'm',
+      tools: ['mcp__reader__search_book'],
+      mcp_servers: [{ name: 'reader', status: 'connected', source: 'dynamic' }],
+    });
+    const [ready] = parseCliLine(line);
+    expect(ready).toMatchObject({ mcpServers: [{ name: 'reader', status: 'connected' }] });
   });
 
   it('ignores transient status and progress lines', () => {
@@ -160,6 +174,18 @@ describe('buildCliArgs', () => {
     const args = buildCliArgs(startOptions({ webSearch: true }));
     expect(args[args.indexOf('--tools') + 1]).toBe('WebSearch');
     expect(args[args.indexOf('--allowedTools') + 1]).toBe('WebSearch');
+  });
+
+  it('pre-approves the reader tools, alone or with web search', () => {
+    const tools = buildCliArgs(startOptions({ readerTools: true }));
+    expect(tools[tools.indexOf('--tools') + 1]).toBe('');
+    expect(tools[tools.indexOf('--allowedTools') + 1]).toBe(
+      'mcp__reader__search_book,mcp__reader__get_pages,mcp__reader__get_toc',
+    );
+    const both = buildCliArgs(startOptions({ readerTools: true, webSearch: true }));
+    expect(both[both.indexOf('--allowedTools') + 1]).toBe(
+      'WebSearch,mcp__reader__search_book,mcp__reader__get_pages,mcp__reader__get_toc',
+    );
   });
 
   it('keeps the personal configuration out and the protocol machine-readable', () => {
@@ -312,6 +338,20 @@ describe('composed selections', () => {
   });
 });
 
+describe('notation list', () => {
+  it('travels once per conversation, first', () => {
+    const withNotation = context({ notation: '⊗ produit tensoriel' });
+    const first = planContext(withNotation, { chapterKey: '', pages: new Set() });
+    expect(first.includeNotation).toBe(true);
+    const text = buildTurnText('q', withNotation, first);
+    expect(text.indexOf('<book-notation>')).toBe(0);
+    const later = planContext(withNotation, { chapterKey: '', pages: new Set(), notation: true });
+    expect(later.includeNotation).toBe(false);
+    expect(buildTurnText('q', withNotation, later)).not.toContain('<book-notation>');
+    expect(planContext(context(), { chapterKey: '', pages: new Set() }).includeNotation).toBe(false);
+  });
+});
+
 describe('buildTurnMessage', () => {
   it('puts each selection image before the text that describes it', () => {
     const message = buildTurnMessage(
@@ -342,6 +382,32 @@ describe('buildHarness', () => {
     expect(harness).toContain('Pierce');
     expect(harness).toContain('crois l’image'.replace('’', "'"));
     expect(harness).not.toContain('recherche web');
+  });
+
+  it('describes the reader tools only when they are given', () => {
+    const without = buildHarness({ bookTitle: '', bookAuthor: '', webSearch: false });
+    expect(without).toContain('aucun outil');
+    expect(without).not.toContain('search_book');
+    const tools = buildHarness({
+      bookTitle: '',
+      bookAuthor: '',
+      webSearch: false,
+      readerTools: true,
+      fixedLayout: true,
+    });
+    expect(tools).toContain('search_book');
+    expect(tools).toContain('get_pages');
+    expect(tools).not.toContain('aucun outil');
+    // Page references in the answers are what the reader clicks, on a PDF.
+    expect(tools).toContain('« p. 208 »');
+    expect(buildHarness({ bookTitle: '', bookAuthor: '', webSearch: false })).not.toContain(
+      '« p. 208 »',
+    );
+  });
+
+  it('separates the messages of a turn that used a tool', () => {
+    const line = '{"type":"stream_event","event":{"type":"message_start","message":{}}}';
+    expect(parseCliLine(line)).toEqual([{ kind: 'message_start' }]);
   });
 
   it('mentions web search only when it is enabled', () => {

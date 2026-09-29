@@ -173,3 +173,27 @@ describe('renderChatMarkdown: robustness', () => {
     expect((performance.now() - start) / 20).toBeLessThan(50);
   });
 });
+
+describe('page references', () => {
+  const pdf = (md: string) => renderChatMarkdown(md, { pageLinks: true });
+
+  it('turns « p. 208 » into a link to the page', () => {
+    const html = pdf('Défini p. 208, repris p. 203–205.');
+    expect(html).toContain('<a class="page-ref" href="#page-208" data-page="208"');
+    expect(html).toContain('>p. 208</a>');
+    expect(html).toContain('data-page="203"');
+    expect(html).toContain('>p. 203–205</a>');
+  });
+
+  it('leaves code, formulas and words ending in p alone', () => {
+    expect(pdf('`p. 3`')).not.toContain('page-ref');
+    expect(pdf('voir app. 3')).not.toContain('page-ref');
+    expect(pdf('$p. 3$')).not.toContain('page-ref');
+    expect(pdf('**Ste**p. 3')).not.toContain('page-ref');
+    expect(pdf('[p. 3](http://x)')).not.toContain('page-ref');
+  });
+
+  it('makes no link for a book without pages', () => {
+    expect(renderChatMarkdown('Défini p. 208.')).not.toContain('page-ref');
+  });
+});

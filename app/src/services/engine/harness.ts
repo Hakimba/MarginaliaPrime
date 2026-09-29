@@ -19,6 +19,10 @@ export interface HarnessOptions {
   bookTitle: string;
   bookAuthor: string;
   webSearch: boolean;
+  /** The reader's tools on the book's index are available. */
+  readerTools?: boolean;
+  /** A PDF: its pages are numbered, and « p. N » in an answer is a link. */
+  fixedLayout?: boolean;
 }
 
 /**
@@ -28,7 +32,13 @@ export interface HarnessOptions {
  */
 export const ANNOTATED_EXAMPLE = String.raw`$$\underbrace{\textcolor{#e4572e}{\mathbb{E}[X]}}_{\text{espérance}} = \sum_x \underbrace{\textcolor{#1f8dd6}{x}}_{\text{valeur}}\,\underbrace{\textcolor{#2a9d4f}{p(x)}}_{\text{probabilité}}$$`;
 
-export const buildHarness = ({ bookTitle, bookAuthor, webSearch }: HarnessOptions): string => {
+export const buildHarness = ({
+  bookTitle,
+  bookAuthor,
+  webSearch,
+  readerTools = false,
+  fixedLayout = false,
+}: HarnessOptions): string => {
   const book = bookTitle
     ? `« ${bookTitle} »${bookAuthor ? ` de ${bookAuthor}` : ''}`
     : 'un livre technique';
@@ -53,6 +63,8 @@ export const buildHarness = ({ bookTitle, bookAuthor, webSearch }: HarnessOption
     '  précédée de son repère [p. N]. Une page n\'est envoyée qu\'une fois par conversation :',
     '  celles reçues plus tôt restent valables. Ce texte extrait a les mêmes défauts que',
     '  celui d\'une sélection.',
+    '- <book-notation> : la liste des notations du livre, quand il en a une, au premier',
+    '  message seulement.',
     '',
     'Comment répondre :',
     '- En français, sauf demande contraire. Concis. Commence par la réponse elle-même : ni',
@@ -68,6 +80,13 @@ export const buildHarness = ({ bookTitle, bookAuthor, webSearch }: HarnessOption
     '- Respecte les conventions de notation du livre quand tu les connais.',
     '- Ne réponds pas au-delà de ce que la question demande.',
     '- Si le passage est ambigu ou si l\'image est illisible, dis-le au lieu de deviner.',
+    ...(fixedLayout
+      ? [
+          '- Pour renvoyer à une page du livre, écris « p. 208 » (ou « p. 203–205 ») : le lecteur',
+          '  clique dessus pour y aller. Toujours le numéro de page du PDF, celui de [p. N], jamais',
+          '  le numéro imprimé sur la page ni celui de l\'index du livre, souvent décalés.',
+        ]
+      : []),
     '',
     'Écrire les mathématiques (ta réponse est rendue par KaTeX) :',
     '- Formules entre $…$ dans le texte, entre $$…$$ à part sur leurs propres lignes.',
@@ -91,10 +110,27 @@ export const buildHarness = ({ bookTitle, bookAuthor, webSearch }: HarnessOption
     '- Interdits, KaTeX ne les rend pas : bussproofs (\\infer, \\AxiomC), tikz, \\xymatrix,',
     '  \\begin{align} (utilise aligned dans un $$…$$), \\label, \\ref, \\eqref.',
     '',
-    'Tu ne disposes d\'aucun outil : pas de lecture de fichiers, pas de commandes, pas de',
-    'mémoire hors de cette conversation. N\'écris jamais de balise d\'appel d\'outil dans ta',
-    'réponse. Si une information te manque, dis-le en une phrase.',
   ];
+
+  if (readerTools) {
+    lines.push(
+      'Pour consulter le reste du livre, tu as trois outils : search_book (un mot, une',
+      'expression ou un symbole dans tout le livre), get_pages (le texte de 5 pages au plus) et',
+      'get_toc (la table des matières). Sers-t\'en quand la réponse dépend d\'une partie du livre',
+      'que tu n\'as pas reçue : où un terme est défini, ce qu\'un autre chapitre en dit. Pas',
+      'pour ce que les pages reçues ou la question suffisent à traiter. Cite les pages où tu',
+      'as trouvé ce que tu avances. Tu n\'as aucun autre outil : ni fichiers, ni commandes.',
+    );
+  } else {
+    lines.push(
+      'Tu ne disposes d\'aucun outil : pas de lecture de fichiers, pas de commandes, pas de',
+      'mémoire hors de cette conversation.',
+    );
+  }
+  lines.push(
+    'N\'écris jamais de balise d\'appel d\'outil dans ta réponse. Si une information te',
+    'manque, dis-le en une phrase.',
+  );
 
   if (webSearch) {
     lines.push(
@@ -112,12 +148,15 @@ export interface TurnOptions {
   includeChapter: boolean;
   /** Pages to send with this turn: those of the window not sent yet. */
   pages?: ContextPage[];
+  /** Include the book's list of notations: first turn of the conversation. */
+  includeNotation?: boolean;
 }
 
 /** What the engine has already given the model in this conversation. */
 export interface SentContext {
   chapterKey: string;
   pages: Set<number>;
+  notation?: boolean;
 }
 
 export const chapterKeyOf = (context: EngineContext): string =>
@@ -131,6 +170,7 @@ export const planContext = (context: EngineContext, sent: SentContext): ContextP
   includeChapter:
     context.chapterText.trim().length > 0 && chapterKeyOf(context) !== sent.chapterKey,
   pages: (context.pages ?? []).filter((p) => p.text.trim() && !sent.pages.has(p.page)),
+  includeNotation: Boolean(context.notation?.trim()) && !sent.notation,
 });
 
 /** "197–207", or "30, 197–199" for a window with gaps. */
@@ -191,9 +231,13 @@ export const buildTurnMessage = (
 export const buildTurnText = (
   question: string,
   context: EngineContext,
-  { includeChapter, pages = [] }: TurnOptions,
+  { includeChapter, pages = [], includeNotation = false }: TurnOptions,
 ): string => {
   const parts: string[] = [];
+
+  if (includeNotation && context.notation?.trim()) {
+    parts.push(tag('book-notation', context.notation.trim()), '');
+  }
 
   if (pages.length) {
     const body = [...pages]

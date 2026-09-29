@@ -49,6 +49,10 @@ interface ChatState {
   contextOwner: string;
   /** The reading context is being extracted; a question should wait for it. */
   contextPending: boolean;
+  /** Progress of the book index the tools search, while it is being built. */
+  indexStatus: { hash: string; done: number; total: number } | null;
+  /** The book's list of notations, sent with the first message, by book. */
+  bookNotation: { hash: string; text: string } | null;
   /** Reading position label, e.g. "p. 30 / 417". */
   position: string;
   /**
@@ -82,6 +86,8 @@ interface ChatState {
   /** Drop the context, if it is still this book's. */
   releaseContext: (owner: string) => void;
   setContextPending: (pending: boolean) => void;
+  setIndexStatus: (status: { hash: string; done: number; total: number } | null) => void;
+  setBookNotation: (notation: { hash: string; text: string } | null) => void;
   updateBookContext: (title: string, author: string, chapter: string, chapterText: string) => void;
   setPosition: (position: string) => void;
   requestChapter: () => void;
@@ -114,6 +120,8 @@ export const useChatStore = create<ChatState>()(
       contextPages: [],
       contextOwner: '',
       contextPending: false,
+      indexStatus: null,
+      bookNotation: null,
       position: '',
       chapterRequest: 0,
       askRequest: null,
@@ -170,6 +178,8 @@ export const useChatStore = create<ChatState>()(
             : {},
         ),
       setContextPending: (pending) => set({ contextPending: pending }),
+      setIndexStatus: (status) => set({ indexStatus: status }),
+      setBookNotation: (notation) => set({ bookNotation: notation }),
       updateBookContext: (title, author, chapter, chapterText) =>
         set({
           bookTitle: title,

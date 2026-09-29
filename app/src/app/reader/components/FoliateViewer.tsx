@@ -64,6 +64,7 @@ import {
   extractPages,
   findTopLevelAncestor,
 } from '@/services/chapterExtraction';
+import { ensureBookIndex } from '@/services/bookIndex';
 import { perfMark, perfSpan } from '@/utils/perf';
 import { useSelectionProbe } from '../hooks/useSelectionProbe';
 import Spinner from '@/components/Spinner';
@@ -200,6 +201,62 @@ const FoliateViewer: React.FC<{
   // A book just opened: the context of the previous one is not its own, and an
   // extraction still running for a closed book must not land in the store.
   const disposed = useRef(false);
+  /**
+   * The index the reader's tools search, built once per book: after the first
+   * page is on screen, one page at a time when the browser is idle.
+   */
+  const indexStarted = useRef(false);
+  const startBookIndex = () => {
+    if (indexStarted.current) return;
+    indexStarted.current = true;
+    const hash = bookKey.split('-')[0] ?? '';
+    const book = getBookData(bookKey)?.book;
+    if (!hash || !book) return;
+    const chat = useChatStore.getState;
+    const idle = () =>
+      new Promise<void>((resolve) => {
+        const ric = (window as unknown as {
+          requestIdleCallback?: (cb: () => void, o?: unknown) => void;
+        }).requestIdleCallback;
+        if (typeof ric === 'function') ric(() => resolve(), { timeout: 1000 });
+        // WebKitGTK has no idle callback: a pause between pages leaves the
+        // main thread to the reader most of the time.
+        else setTimeout(resolve, 80);
+      });
+    const endIndex = perfSpan('index:build', { hash });
+    let lastPercent = -1;
+    void (async () => {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const index = await ensureBookIndex(
+        bookDoc,
+        { hash, title: book.title, fixedLayout: bookDoc.rendition?.layout === 'pre-paginated' },
+        {
+          load: (h) => invoke<string | null>('book_index_load', { hash: h }),
+          write: (h, content) => invoke('book_index_write', { hash: h, content }),
+        },
+        {
+          cancelled: () => disposed.current,
+          pause: idle,
+          // Shown in whole percents: one store update per page re-rendered
+          // the chat panel four hundred times.
+          onProgress: (done, total) => {
+            const percent = Math.floor((100 * done) / total);
+            if (done < total && percent === lastPercent) return;
+            lastPercent = percent;
+            chat().setIndexStatus(done < total ? { hash, done, total } : null);
+          },
+        },
+      );
+      endIndex({ pages: index?.pages.length ?? 0, complete: !!index?.complete });
+      if (disposed.current) return;
+      chat().setIndexStatus(null);
+      chat().setBookNotation(index?.notation ? { hash, text: index.notation } : null);
+    })().catch((e) => {
+      console.warn('index: book index failed', e);
+      if (!disposed.current) chat().setIndexStatus(null);
+    });
+  };
+
   useEffect(() => {
     disposed.current = false;
     useChatStore.getState().setContextPages([], bookKey);
@@ -211,6 +268,11 @@ const FoliateViewer: React.FC<{
       pendingChapter.current = null;
       // Only this book's context: another one open beside it keeps its own.
       useChatStore.getState().releaseContext(bookKey);
+      // Only this book's: another one open beside it keeps its own.
+      const hash = bookKey.split('-')[0] ?? '';
+      const chat = useChatStore.getState();
+      if (chat.indexStatus?.hash === hash) chat.setIndexStatus(null);
+      if (chat.bookNotation?.hash === hash) chat.setBookNotation(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -246,6 +308,10 @@ const FoliateViewer: React.FC<{
     if (firstRelocate.current) {
       firstRelocate.current = false;
       perfMark('book:first-relocate', { bookKey, page: currentPage, total });
+      // Well after the first page: opening a book is the one wait allowed.
+      setTimeout(() => {
+        if (!disposed.current) startBookIndex();
+      }, 3000);
     }
     setProgress(
       bookKey,

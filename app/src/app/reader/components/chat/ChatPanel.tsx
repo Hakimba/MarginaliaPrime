@@ -17,6 +17,7 @@ import { useChatStore, type PendingSelection } from '@/store/chatStore';
 import { perfMark } from '@/utils/perf';
 import { useSidebarStore } from '@/store/sidebarStore';
 import { useReaderStore } from '@/store/readerStore';
+import { useBookDataStore } from '@/store/bookDataStore';
 
 import {
   ClaudeCliEngine,
@@ -63,8 +64,14 @@ function generateId(): string {
  * One answer, rendered once. Without the memo every streamed chunk rendered
  * the whole transcript again, formulas included.
  */
-const ChatMarkdown = React.memo(function ChatMarkdown({ content }: { content: string }) {
-  const html = useMemo(() => renderChatMarkdown(content), [content]);
+const ChatMarkdown = React.memo(function ChatMarkdown({
+  content,
+  pageLinks = false,
+}: {
+  content: string;
+  pageLinks?: boolean;
+}) {
+  const html = useMemo(() => renderChatMarkdown(content, { pageLinks }), [content, pageLinks]);
   return (
     <div
       className='chat-markdown prose prose-sm max-w-none'
@@ -85,11 +92,11 @@ const itemsOf = (message: ChatMessage | undefined): SentItem[] => {
 };
 
 /** An image rendered at 3 px per point, shown about the size it has on the page. */
-const PageImage: React.FC<{ image: string; alt: string; className?: string }> = ({
-  image,
-  alt,
-  className,
-}) => (
+const PageImage: React.FC<{
+  image: string;
+  alt: string;
+  className?: string;
+}> = ({ image, alt, className }) => (
   <img
     src={`data:image/png;base64,${image}`}
     alt={alt}
@@ -106,8 +113,14 @@ const PageImage: React.FC<{ image: string; alt: string; className?: string }> = 
  * the reader checks the transcription against the page without scrolling up.
  * An answer without a transcription, or a turn without images, is left as is.
  */
-const Answer: React.FC<{ content: string; items: SentItem[] }> = ({ content, items }) => {
-  if (!items.some((item) => item.image)) return <ChatMarkdown content={content} />;
+const Answer: React.FC<{
+  content: string;
+  items: SentItem[];
+  pageLinks?: boolean;
+}> = ({ content, items, pageLinks = false }) => {
+  if (!items.some((item) => item.image)) {
+    return <ChatMarkdown content={content} pageLinks={pageLinks} />;
+  }
   return (
     <>
       {splitTranscriptions(content).map((piece, j) => {
@@ -121,7 +134,7 @@ const Answer: React.FC<{ content: string; items: SentItem[] }> = ({ content, ite
                 className='border-base-300 mb-1 border'
               />
             )}
-            <ChatMarkdown content={piece.content} />
+            <ChatMarkdown content={piece.content} pageLinks={pageLinks} />
           </div>
         );
       })}
@@ -136,7 +149,9 @@ const SentPassages: React.FC<{ items: SentItem[] }> = ({ items }) => {
     <div className='mb-2 flex flex-col gap-1.5'>
       {items.map((item, k) => (
         <div key={k} className='flex items-start gap-1.5'>
-          {items.length > 1 && <span className='text-xs leading-5 opacity-80'>{circled(k + 1)}</span>}
+          {items.length > 1 && (
+            <span className='text-xs leading-5 opacity-80'>{circled(k + 1)}</span>
+          )}
           {item.image ? (
             <PageImage image={item.image} alt={`Passage ${k + 1}`} />
           ) : (
@@ -161,10 +176,11 @@ const ContextLine: React.FC<{
   position: string;
   chapter: string;
   pending: boolean;
+  index: { done: number; total: number } | null;
   plan: ContextPlan;
   hasPages: boolean;
   hasChapter: boolean;
-}> = ({ position, chapter, pending, plan, hasPages, hasChapter }) => {
+}> = ({ position, chapter, pending, index, plan, hasPages, hasChapter }) => {
   const sent = plan.pages.length
     ? `p. ${pageRanges(plan.pages.map((p) => p.page))} jointes`
     : plan.includeChapter
@@ -174,7 +190,13 @@ const ContextLine: React.FC<{
         : hasChapter
           ? 'chapitre déjà transmis'
           : '';
-  const parts = [position, chapter, pending ? 'lecture du contexte…' : sent].filter(Boolean);
+  const parts = [
+    position,
+    chapter,
+    pending ? 'lecture du contexte…' : sent,
+    // The tools search what is indexed so far: say how far that is.
+    index && index.total ? `index du livre ${Math.floor((100 * index.done) / index.total)} %` : '',
+  ].filter(Boolean);
   if (!parts.length) return null;
   return (
     <div
@@ -219,6 +241,35 @@ const findPassage = (doc: Document, wanted: string): Range | null => {
   return range;
 };
 
+/** Whether the book the panel talks about is a PDF, whose pages links go to. */
+const currentFixedLayout = (): boolean => {
+  const key = useSidebarStore.getState().sideBarBookKey;
+  return Boolean(key && useBookDataStore.getState().getBookData(key)?.isFixedLayout);
+};
+
+/** A tool call in the reader's words: what the model is looking up. */
+const toolLabel = (name: string, input: unknown): string => {
+  const args = (input ?? {}) as Record<string, unknown>;
+  switch (name) {
+    case 'mcp__reader__search_book':
+      return args['query']
+        ? `Recherche dans le livre : ${String(args['query'])}`
+        : 'Recherche dans le livre';
+    case 'mcp__reader__get_pages': {
+      const from = Number(args['from']);
+      const to = Number(args['to'] ?? from);
+      if (!from) return 'Lecture de pages du livre';
+      return to > from ? `Lecture des p. ${from}–${to}` : `Lecture de la p. ${from}`;
+    }
+    case 'mcp__reader__get_toc':
+      return 'Lecture de la table des matières';
+    case 'WebSearch':
+      return args['query'] ? `Recherche web : ${String(args['query'])}` : 'Recherche web';
+    default:
+      return name;
+  }
+};
+
 /** Words of a passage, for the chip. */
 const wordCount = (text: string): number => text.split(/\s+/).filter(Boolean).length;
 
@@ -234,7 +285,14 @@ const chipLabel = (selection: PendingSelection): string =>
     .join(' · ');
 
 /** What goes to the engine: the reader's choices applied, the chip's fields dropped. */
-const toEngineSelection = ({ text, surroundingText, location, page, imageBase64, imageOff }: PendingSelection) => ({
+const toEngineSelection = ({
+  text,
+  surroundingText,
+  location,
+  page,
+  imageBase64,
+  imageOff,
+}: PendingSelection) => ({
   text,
   ...(surroundingText ? { surroundingText } : {}),
   ...(location ? { location } : {}),
@@ -252,6 +310,7 @@ const ChatPanel: React.FC = () => {
     currentChapterText,
     contextPages,
     contextPending,
+    indexStatus,
     position,
     bookTitle,
     bookAuthor,
@@ -368,6 +427,10 @@ const ChatPanel: React.FC = () => {
   /** Identifies the process configuration; a change means restart. */
   const engineSignature = useRef('');
   const accumulated = useRef('');
+  /** What the model looked up during the turn in progress. */
+  const turnTools = useRef<string[]>([]);
+  /** The reader tools were asked for, and whether their absence was reported. */
+  const toolsReported = useRef(false);
   /**
    * The debounced save still waiting to run, if any. Leaving a conversation
    * runs it at once: cancelled, it lost the answer that had just arrived when
@@ -397,8 +460,11 @@ const ChatPanel: React.FC = () => {
       claudeBinaryInfo().catch((e: unknown) => {
         setError(typeof e === 'string' ? e : e instanceof Error ? e.message : String(e));
       });
-    const idle = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: unknown) => void })
-      .requestIdleCallback;
+    const idle = (
+      window as unknown as {
+        requestIdleCallback?: (cb: () => void, o?: unknown) => void;
+      }
+    ).requestIdleCallback;
     if (typeof idle === 'function') idle(() => void check(), { timeout: 4000 });
     else setTimeout(() => void check(), 1000);
   }, [isOpen]);
@@ -522,21 +588,54 @@ const ChatPanel: React.FC = () => {
     // Also on the console, so the smoke test can read the whole exchange.
     console.info(`engine event: ${line}`);
     switch (event.kind) {
-      case 'ready':
+      case 'ready': {
         setSessionId(event.sessionId);
+        // The tools are an extra: without them the chat still answers, but
+        // the reader should know why it cannot look anything up.
+        const reader = event.mcpServers?.find((s) => s.name === 'reader');
+        // "pending" is a server still starting: only a real failure is said.
+        if (
+          reader &&
+          !toolsReported.current &&
+          reader.status !== 'connected' &&
+          reader.status !== 'pending'
+        ) {
+          toolsReported.current = true;
+          reportError(
+            `Les outils de recherche dans le livre n'ont pas démarré (${reader.status}) : Claude répond sans eux.`,
+          );
+        }
         break;
+      }
       case 'text':
         accumulated.current += event.text;
         setStreamingContent(accumulated.current);
         break;
-      case 'tool_use':
-        setActiveTool(event.name);
+      case 'message_start':
+        // After a tool call the model writes a new message: keep its text
+        // apart from what it wrote before the call.
+        if (accumulated.current.trim() && !accumulated.current.endsWith('\n\n')) {
+          accumulated.current += '\n\n';
+        }
         break;
+      case 'tool_use': {
+        const label = toolLabel(event.name, event.input);
+        turnTools.current = [...turnTools.current, label];
+        setActiveTool(label);
+        break;
+      }
       case 'tool_result':
         setActiveTool(null);
         break;
       case 'done': {
-        const text = event.text || accumulated.current;
+        const tools = turnTools.current;
+        // The final result holds the last message only: with tool calls in
+        // between, what was streamed is the whole answer.
+        const text =
+          tools.length && accumulated.current.trim()
+            ? accumulated.current.trim()
+            : event.text || accumulated.current;
+        turnTools.current = [];
         accumulated.current = '';
         setStreamingContent('');
         setIsStreaming(false);
@@ -548,7 +647,12 @@ const ChatPanel: React.FC = () => {
         if (text.trim()) {
           setMessages((prev) => [
             ...prev,
-            { role: 'assistant', content: text, timestamp: Date.now() },
+            {
+              role: 'assistant',
+              content: text,
+              timestamp: Date.now(),
+              ...(tools.length ? { tools } : {}),
+            },
           ]);
         } else {
           // The engine can finish a turn with nothing visible; say so rather
@@ -585,7 +689,7 @@ const ChatPanel: React.FC = () => {
         setActiveTool(null);
         // A clean exit after an answer is normal; a mid-turn exit is not.
         if (accumulated.current || streamingContentRef.current) {
-          setError('Le moteur s\'est arrêté avant la fin de la réponse.');
+          setError("Le moteur s'est arrêté avant la fin de la réponse.");
         }
         accumulated.current = '';
         setStreamingContent('');
@@ -629,64 +733,74 @@ const ChatPanel: React.FC = () => {
   }, [streamingContent]);
 
   /** Start the backend if needed. Returns null and sets an error on failure. */
-  const ensureEngine = useCallback(async (allowResume = true): Promise<Engine | null> => {
-    // The index carries the session id of an earlier conversation; starting
-    // before it lands would silently lose yesterday's context. Read the
-    // conversation id from the store afterwards, not from this closure, which
-    // may predate the index landing.
-    await conversationsReady.current;
-    const conversationId = useChatStore.getState().conversationId;
+  const ensureEngine = useCallback(
+    async (allowResume = true): Promise<Engine | null> => {
+      // The index carries the session id of an earlier conversation; starting
+      // before it lands would silently lose yesterday's context. Read the
+      // conversation id from the store afterwards, not from this closure, which
+      // may predate the index landing.
+      await conversationsReady.current;
+      const conversationId = useChatStore.getState().conversationId;
 
-    const signature = `${backendId}:${model.id}:${webSearchEnabled}:${conversationId}`;
-    // `allowResume: false` is the recovery path: the running process is the one
-    // that just failed, so reusing it would send the turn into a dead pipe.
-    if (allowResume && engineRef.current?.isRunning() && engineSignature.current === signature) {
-      return engineRef.current;
-    }
-    await stopEngine();
+      const signature = `${backendId}:${model.id}:${webSearchEnabled}:${conversationId}`;
+      // `allowResume: false` is the recovery path: the running process is the one
+      // that just failed, so reusing it would send the turn into a dead pipe.
+      if (allowResume && engineRef.current?.isRunning() && engineSignature.current === signature) {
+        return engineRef.current;
+      }
+      await stopEngine();
 
-    const engine = new ClaudeCliEngine();
-    engine.subscribe(onEngineEvent);
-    // Resuming only makes sense when the reader can see the history that the
-    // model will remember. An empty transcript always starts a fresh session.
-    const resume =
-      allowResume && messagesRef.current.length > 0
-        ? conversationsRef.current.find((c) => c.id === conversationId)?.engineSessionId
-        : undefined;
-    startedWithResume.current = Boolean(resume);
-    console.info(
-      `engine start: conversation=${conversationId} resume=${resume ?? 'none'} ` +
-        `known=${conversationsRef.current.length}`,
-    );
-    try {
-      const info = await engine.start({
-        conversationId,
-        bookKey: bookHash || 'default',
-        model,
-        webSearch: webSearchEnabled,
-        harnessContext: { bookTitle, bookAuthor },
-        ...(resume ? { resumeSessionId: resume } : {}),
-      });
-      engineRef.current = engine;
-      engineSignature.current = signature;
-      setStartInfo(info);
-      setError(null);
-      return engine;
-    } catch (e) {
-      reportError(e instanceof Error ? e.message : String(e));
-      return null;
-    }
-  }, [
-    backendId,
-    model,
-    webSearchEnabled,
-    bookHash,
-    bookTitle,
-    bookAuthor,
-    onEngineEvent,
-    stopEngine,
-    reportError,
-  ]);
+      const engine = new ClaudeCliEngine();
+      engine.subscribe(onEngineEvent);
+      // Resuming only makes sense when the reader can see the history that the
+      // model will remember. An empty transcript always starts a fresh session.
+      const resume =
+        allowResume && messagesRef.current.length > 0
+          ? conversationsRef.current.find((c) => c.id === conversationId)?.engineSessionId
+          : undefined;
+      startedWithResume.current = Boolean(resume);
+      console.info(
+        `engine start: conversation=${conversationId} resume=${resume ?? 'none'} ` +
+          `known=${conversationsRef.current.length}`,
+      );
+      try {
+        const info = await engine.start({
+          conversationId,
+          bookKey: bookHash || 'default',
+          model,
+          webSearch: webSearchEnabled,
+          // The tools search the book's index; a panel without a book has none.
+          readerTools: Boolean(bookHash),
+          harnessContext: {
+            bookTitle,
+            bookAuthor,
+            fixedLayout: currentFixedLayout(),
+          },
+          ...(resume ? { resumeSessionId: resume } : {}),
+        });
+        engineRef.current = engine;
+        engineSignature.current = signature;
+        toolsReported.current = false;
+        setStartInfo(info);
+        setError(null);
+        return engine;
+      } catch (e) {
+        reportError(e instanceof Error ? e.message : String(e));
+        return null;
+      }
+    },
+    [
+      backendId,
+      model,
+      webSearchEnabled,
+      bookHash,
+      bookTitle,
+      bookAuthor,
+      onEngineEvent,
+      stopEngine,
+      reportError,
+    ],
+  );
 
   const ensureEngineRef = useRef<((allowResume?: boolean) => Promise<Engine | null>) | null>(null);
   ensureEngineRef.current = ensureEngine;
@@ -701,6 +815,7 @@ const ChatPanel: React.FC = () => {
       bookAuthor: s.bookAuthor,
       chapterTitle: s.currentChapter,
       chapterText: s.currentChapterText,
+      notation: s.bookNotation?.hash === s.bookHash ? s.bookNotation.text : '',
       pages: s.contextPages,
       position: s.position,
       selections: s.pendingSelections.map(toEngineSelection),
@@ -743,7 +858,6 @@ const ChatPanel: React.FC = () => {
   };
 
   const sendTurn = async (text: string, fromPage: boolean) => {
-
     // The context is extracted lazily; ask for it now and give it a moment,
     // so the very first question of a session is not sent without it.
     if (useChatStore.getState().contextPending) {
@@ -795,6 +909,7 @@ const ChatPanel: React.FC = () => {
     setIsStreaming(true);
     setStreamingContent('');
     accumulated.current = '';
+    turnTools.current = [];
     setError(null);
 
     try {
@@ -905,7 +1020,10 @@ const ChatPanel: React.FC = () => {
         while (pending[0]?.startsWith('book:')) pending.shift();
         smokeQueue.current = pending.length
           ? pending
-          : question.split('|').map((q) => q.trim()).filter(Boolean);
+          : question
+              .split('|')
+              .map((q) => q.trim())
+              .filter(Boolean);
         setOpen(true);
         // Let the store settle so the first turn carries chapter and position.
         setTimeout(() => void runSmokeStepRef.current?.(), 600);
@@ -952,6 +1070,7 @@ const ChatPanel: React.FC = () => {
    *                    ignored; "a...b" from a to b), through the same path as Ask AI
    *   toggleimg:<k>    take the image of pending passage k out, or back in
    *   remove:<k>       remove pending passage k;  clear: remove them all
+   *   clicklink        click the last page link of the answers
    *   abort            stop the engine
    *   wait:<ms>        pause
    * Everything else is asked as a question. This is the only way to exercise
@@ -1014,7 +1133,10 @@ const ChatPanel: React.FC = () => {
       const content = view?.renderer.getContents?.().find((c) => c.index === index);
       const range = content ? findPassage(content.doc, rest.join(':')) : null;
       if (!range) {
-        const flat = (content?.doc.querySelector('.textLayer')?.textContent ?? '').replace(/\s+/g, '');
+        const flat = (content?.doc.querySelector('.textLayer')?.textContent ?? '').replace(
+          /\s+/g,
+          '',
+        );
         console.info(`smoke: passage not found on page ${pageText}: ${flat.slice(0, 1500)}`);
       } else {
         const text = getTextFromRange(range);
@@ -1035,6 +1157,20 @@ const ChatPanel: React.FC = () => {
       next();
       return;
     }
+    if (step === 'clicklink') {
+      // The first page link of the last answer, clicked as the reader would.
+      const links = document.querySelectorAll<HTMLAnchorElement>('.chat-panel a.page-ref');
+      const link = links[links.length - 1];
+      console.info(`smoke: clicking ${link ? link.textContent : 'no link'}`);
+      link?.click();
+      setTimeout(() => {
+        const key = useSidebarStore.getState().sideBarBookKey;
+        const page = key ? useReaderStore.getState().getProgress(key)?.section?.current : undefined;
+        console.info(`smoke: now on page ${page !== undefined ? page + 1 : '?'}`);
+        void runSmokeStepRef.current?.();
+      }, 2500);
+      return;
+    }
     if (step.startsWith('toggleimg:') || step.startsWith('remove:') || step === 'clear') {
       const chat = useChatStore.getState();
       const k = Number(step.split(':')[1]) - 1;
@@ -1043,7 +1179,9 @@ const ChatPanel: React.FC = () => {
       else if (chat.pendingSelections[k]) chat.toggleSelectionImage(chat.pendingSelections[k]!.id);
       console.info(
         `smoke: pending ${JSON.stringify(
-          useChatStore.getState().pendingSelections.map((p) => [p.page, !!p.imageBase64 && !p.imageOff]),
+          useChatStore
+            .getState()
+            .pendingSelections.map((p) => [p.page, !!p.imageBase64 && !p.imageOff]),
         )}`,
       );
       next();
@@ -1083,9 +1221,29 @@ const ChatPanel: React.FC = () => {
     };
   };
 
+  /** « p. 208 » in an answer: take the reader there. PDF only, pages being pages. */
+  const handlePageLink = (e: React.MouseEvent<HTMLDivElement>) => {
+    const link = (e.target as HTMLElement).closest?.('a.page-ref') as HTMLAnchorElement | null;
+    if (!link) return;
+    e.preventDefault();
+    const page = Number(link.dataset['page']);
+    const key = useSidebarStore.getState().sideBarBookKey;
+    if (!key || !page) return;
+    const data = useBookDataStore.getState().getBookData(key);
+    const pages = data?.bookDoc?.sections?.length ?? 0;
+    if (!data?.isFixedLayout || page > pages) return;
+    const view = useReaderStore.getState().getView(key);
+    // One section per page: the CFI of page n is the n-th spine item.
+    Promise.resolve(view?.goTo(`epubcfi(/6/${2 * page})`)).catch((err: unknown) =>
+      console.warn('chat: page link failed', err),
+    );
+    console.info(`chat: page link ${page}`);
+  };
+
   if (!isOpen) return null;
 
   const contextPlan = nextPlan(buildContext());
+  const pageLinks = currentFixedLayout();
 
   return (
     <div
@@ -1163,7 +1321,13 @@ const ChatPanel: React.FC = () => {
         </div>
       )}
 
-      <div className='flex-1 space-y-3 overflow-y-auto px-3 py-2 select-text'>
+      {/* Delegated click for the page links of the answers: the links are
+          real anchors, focusable and activated by the keyboard themselves. */}
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
+      <div
+        className='flex-1 space-y-3 overflow-y-auto px-3 py-2 select-text'
+        onClick={handlePageLink}
+      >
         {messages.length === 0 && !streamingContent && (
           <div className='text-base-content/30 flex h-full items-center justify-center text-sm'>
             Sélectionne un passage, ou pose une question
@@ -1185,7 +1349,23 @@ const ChatPanel: React.FC = () => {
                   <span className='whitespace-pre-wrap'>{msg.content}</span>
                 </div>
               ) : (
-                <Answer content={msg.content} items={itemsOf(messages[i - 1])} />
+                <>
+                  {msg.tools?.length ? (
+                    <div className='text-base-content/50 mb-1 flex flex-col text-[11px]'>
+                      {msg.tools.map((tool, k) => (
+                        <span key={k} className='flex items-center gap-1'>
+                          <FiSearch size={10} className='shrink-0' />
+                          {tool}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  <Answer
+                    content={msg.content}
+                    items={itemsOf(messages[i - 1])}
+                    pageLinks={pageLinks}
+                  />
+                </>
               )}
             </div>
           </div>
@@ -1193,7 +1373,11 @@ const ChatPanel: React.FC = () => {
         {streamingContent && (
           <div className='chat chat-start'>
             <div className='chat-bubble bg-base-200 text-base-content text-sm'>
-              <Answer content={streamingContent} items={itemsOf(messages[messages.length - 1])} />
+              <Answer
+                content={streamingContent}
+                items={itemsOf(messages[messages.length - 1])}
+                pageLinks={pageLinks}
+              />
             </div>
           </div>
         )}
@@ -1207,7 +1391,7 @@ const ChatPanel: React.FC = () => {
         {activeTool && (
           <div className='text-base-content/50 flex items-center gap-2 px-1 py-1 text-xs'>
             <FiSearch size={12} className='animate-pulse' />
-            <span>{activeTool === 'WebSearch' ? 'Recherche web…' : `${activeTool}…`}</span>
+            <span>{activeTool}…</span>
           </div>
         )}
         {error && <div className='alert alert-error text-xs'>{error}</div>}
@@ -1308,6 +1492,7 @@ const ChatPanel: React.FC = () => {
         position={position}
         chapter={currentChapter}
         pending={contextPending}
+        index={indexStatus?.hash === bookHash ? indexStatus : null}
         plan={contextPlan}
         hasPages={contextPages.length > 0}
         hasChapter={currentChapterText.trim().length > 0}
@@ -1366,9 +1551,7 @@ const ChatPanel: React.FC = () => {
         </div>
       </div>
 
-      {showInspect && (
-        <InspectOverlay data={inspectData()} onClose={() => setShowInspect(false)} />
-      )}
+      {showInspect && <InspectOverlay data={inspectData()} onClose={() => setShowInspect(false)} />}
     </div>
   );
 };

@@ -34,6 +34,8 @@ export interface ContextPlan {
   includeChapter: boolean;
   /** Pages of the window the model has not been given yet (PDF). */
   pages: ContextPage[];
+  /** The book's list of notations travels (first turn of the conversation). */
+  includeNotation?: boolean;
 }
 
 /** Everything the model should know about where the reader is right now. */
@@ -43,6 +45,8 @@ export interface EngineContext {
   chapterTitle: string;
   /** Full chapter text; sent once per conversation, not on every turn. */
   chapterText: string;
+  /** The book's own list of notations; sent once per conversation. */
+  notation?: string;
   /**
    * Fixed-layout books: the pages around the reader, instead of a chapter.
    * Each page travels once per conversation.
@@ -55,9 +59,19 @@ export interface EngineContext {
 
 export type EngineEvent =
   /** The CLI accepted the session and reported its configuration. */
-  | { kind: 'ready'; sessionId: string; model: string; tools: string[]; cwd?: string }
+  | {
+      kind: 'ready';
+      sessionId: string;
+      model: string;
+      tools: string[];
+      cwd?: string;
+      /** MCP servers and whether they connected, e.g. the reader's tools. */
+      mcpServers?: { name: string; status: string }[];
+    }
   /** A chunk of the assistant's answer. */
   | { kind: 'text'; text: string }
+  /** A new assistant message begins within the turn (after a tool call). */
+  | { kind: 'message_start' }
   /** The model started using a tool. */
   | { kind: 'tool_use'; id: string; name: string; input?: unknown }
   /** A tool returned. */
@@ -98,8 +112,10 @@ export interface EngineStartOptions {
   /** Reuse a CLI session recorded earlier, after an app restart. */
   resumeSessionId?: string;
   webSearch: boolean;
+  /** Give the model the reader's tools on the book's index (search, pages, TOC). */
+  readerTools?: boolean;
   /** Book-level facts that belong in the stable system prompt. */
-  harnessContext: { bookTitle: string; bookAuthor: string };
+  harnessContext: { bookTitle: string; bookAuthor: string; fixedLayout?: boolean };
 }
 
 /** What was actually launched, for the Inspect overlay. */

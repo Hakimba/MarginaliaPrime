@@ -6,8 +6,10 @@ use tauri_plugin_fs::FsExt;
 #[cfg(desktop)]
 use tauri::Url;
 
+mod book_index;
 mod dir_scanner;
 mod engine;
+pub mod reader_tools;
 
 use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
 
@@ -147,6 +149,8 @@ pub fn run() {
             engine::engine_start,
             engine::engine_send,
             engine::engine_stop,
+            book_index::book_index_load,
+            book_index::book_index_write,
         ])
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())

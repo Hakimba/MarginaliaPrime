@@ -57,6 +57,13 @@ export const parseCliEvent = (msg: Record<string, unknown>): EngineEvent[] => {
           model: (msg['model'] as string) ?? '',
           tools: (msg['tools'] as string[]) ?? [],
           cwd: msg['cwd'] as string | undefined,
+          ...(Array.isArray(msg['mcp_servers'])
+            ? {
+                mcpServers: (msg['mcp_servers'] as { name?: string; status?: string }[]).map(
+                  (s) => ({ name: s.name ?? '', status: s.status ?? '' }),
+                ),
+              }
+            : {}),
         },
       ];
     }
@@ -65,6 +72,9 @@ export const parseCliEvent = (msg: Record<string, unknown>): EngineEvent[] => {
 
   if (type === 'stream_event') {
     const event = msg['event'] as Record<string, unknown> | undefined;
+    // Text written before a tool call and text written after it are two
+    // messages: the panel separates them.
+    if (event?.['type'] === 'message_start') return [{ kind: 'message_start' }];
     if (event?.['type'] !== 'content_block_delta') return [];
     const delta = event['delta'] as Record<string, unknown> | undefined;
     // thinking_delta and signature_delta carry no displayable text.
