@@ -15,6 +15,8 @@ interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  /** For answers: what the model looked up in the book, in plain words. */
+  tools?: string[];
   /** For user messages with a book selection — displayed as a compact quote */
   selection?: {
     text: string;

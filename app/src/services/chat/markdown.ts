@@ -120,6 +120,44 @@ const inlineMath: TokenizerAndRendererExtension = {
 };
 
 /**
+ * « p. 208 », « p. 203–205 », « pp. 12-14 »: a page of the book, rendered as a
+ * link the chat panel follows. Not after a letter or a digit (« app. 3 »).
+ */
+const PAGE_REF = /^(pp?\.)[ \u00a0]?(\d{1,4})(?:[ \u00a0]?[–-][ \u00a0]?(\d{1,4}))?(?!\d)/;
+const PAGE_REF_START = /(?<![\p{L}\p{N}])pp?\.[ \u00a0]?\d/u;
+
+interface PageRefToken extends Tokens.Generic {
+  first: number;
+}
+
+/** Page links are rendered for a PDF only: an EPUB has no pages to go to. */
+let pageLinks = false;
+
+const pageRef: TokenizerAndRendererExtension = {
+  name: 'pageRef',
+  level: 'inline',
+  start(src) {
+    if (!pageLinks) return undefined;
+    const m = PAGE_REF_START.exec(src);
+    return m ? m.index : undefined;
+  },
+  tokenizer(src, tokens) {
+    if (!pageLinks || this.lexer.state.inLink) return undefined;
+    const m = PAGE_REF.exec(src);
+    if (!m) return undefined;
+    // `start` sees the text from where marked resumes, not what came before:
+    // « **Ste**p. 3 » must stay text.
+    const before = tokens.at(-1)?.raw.slice(-1) ?? '';
+    if (/[\p{L}\p{N}*_]/u.test(before)) return undefined;
+    return { type: 'pageRef', raw: m[0], first: Number(m[2]) } as PageRefToken;
+  },
+  renderer(token) {
+    const { raw, first } = token as PageRefToken;
+    return `<a class="page-ref" href="#page-${first}" data-page="${first}" title="Aller à la page ${first}">${escapeHtml(raw)}</a>`;
+  },
+};
+
+/**
  * Formulas of the parse in progress. The renderer leaves a placeholder in the
  * HTML and the formula is put back after sanitising: KaTeX's output is large
  * (about 2 kB a formula) and running DOMPurify over all of it on every
@@ -182,7 +220,7 @@ const escapeHtml = (value: string): string =>
 // and must not start reading dollar signs as mathematics.
 const chatMarked = new Marked({ gfm: true, breaks: false });
 chatMarked.use({
-  extensions: [blockMath, inlineMath],
+  extensions: [blockMath, inlineMath, pageRef],
   renderer: {
     // An alt attribute is plain text. Marked renders it from the inline
     // tokens, formulas included, which put a formula's markup inside the
@@ -201,14 +239,19 @@ const newNonce = (): string => {
 };
 
 /** Markdown and mathematics to sanitised HTML. Parse first, sanitise last. */
-export const renderChatMarkdown = (content: string): string => {
+export const renderChatMarkdown = (
+  content: string,
+  options: { pageLinks?: boolean } = {},
+): string => {
   const parse = { nonce: newNonce(), html: [] as string[] };
   pending = parse;
+  pageLinks = options.pageLinks ?? false;
   let html: string;
   try {
     html = chatMarked.parse(content, { async: false }) as string;
   } finally {
     pending = null;
+    pageLinks = false;
   }
   const clean = DOMPurify.sanitize(html);
   if (!parse.html.length) return clean;

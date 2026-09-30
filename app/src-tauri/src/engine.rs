@@ -125,6 +125,42 @@ fn workdir_for(app: &AppHandle, book_key: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// The MCP configuration naming the reader's tool server for this book.
+fn write_tools_config(
+    app: &AppHandle,
+    cwd: &std::path::Path,
+    book_key: &str,
+) -> Result<PathBuf, String> {
+    // Packaged as an AppImage, the running file is inside a temporary mount
+    // and needs the AppImage's own environment: relaunch the AppImage itself.
+    let exe = match std::env::var_os("APPIMAGE") {
+        Some(appimage) => PathBuf::from(appimage),
+        None => {
+            let exe = std::env::current_exe().map_err(|e| format!("cannot locate the app: {e}"))?;
+            // Replaced while running (an upgrade, a rebuild): the new file is
+            // at the same place, the old one only in memory.
+            let shown = exe.to_string_lossy().to_string();
+            match shown.strip_suffix(" (deleted)") {
+                Some(path) => PathBuf::from(path),
+                None => exe,
+            }
+        }
+    };
+    let index = crate::book_index::index_path(app, book_key)?;
+    let config = serde_json::json!({
+        "mcpServers": {
+            "reader": {
+                "command": exe.to_string_lossy(),
+                "args": ["--reader-tools", index.to_string_lossy()],
+            }
+        }
+    });
+    let path = cwd.join("reader-tools.json");
+    std::fs::write(&path, config.to_string())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// Report the CLI's path and version, so the panel can explain a missing or
 /// broken installation before the first message is sent.
 #[tauri::command]
@@ -145,6 +181,11 @@ pub async fn engine_binary_info() -> Result<BinaryInfo, String> {
 /// Spawn a CLI process for `id`. `args` is the full argument list except the
 /// harness flag, which is appended here after writing `harness.md` into the
 /// process working directory.
+///
+/// With `reader_tools`, the process also gets the reader's tool server: this
+/// very binary, relaunched by the CLI with `--reader-tools` on the book's
+/// index. The path comes from the running executable, so it is right however
+/// the app was started, and nothing else (no Node) needs installing.
 #[tauri::command]
 pub async fn engine_start(
     app: AppHandle,
@@ -153,6 +194,7 @@ pub async fn engine_start(
     book_key: String,
     args: Vec<String>,
     harness: String,
+    reader_tools: Option<bool>,
 ) -> Result<StartInfo, String> {
     let processes = state.processes.clone();
     stop_process(&processes, &id).await;
@@ -166,6 +208,18 @@ pub async fn engine_start(
     let mut full_args = args;
     full_args.push("--append-system-prompt-file".to_string());
     full_args.push(harness_path.to_string_lossy().to_string());
+
+    // Without the tools the chat still answers: a failure here is logged, and
+    // the panel reports the missing server from the CLI's own `init`.
+    if reader_tools.unwrap_or(false) {
+        match write_tools_config(&app, &cwd, &book_key) {
+            Ok(config_path) => {
+                full_args.push("--mcp-config".to_string());
+                full_args.push(config_path.to_string_lossy().to_string());
+            }
+            Err(e) => log::warn!("reader tools unavailable: {e}"),
+        }
+    }
 
     let mut child = Command::new(&binary)
         .args(&full_args)

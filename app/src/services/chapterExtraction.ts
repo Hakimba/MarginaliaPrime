@@ -285,7 +285,7 @@ export async function extractPages(
  * Resolve a TOC href into a section index and optional fragment ID.
  * Handles the async case (PDF) transparently.
  */
-async function resolveTocHref(
+export async function resolveTocHref(
   bookDoc: BookDoc,
   href: string | undefined,
 ): Promise<{ sectionId: string | number | null; fragment: string | null }> {
@@ -301,7 +301,7 @@ async function resolveTocHref(
 /**
  * Find the index in bookDoc.sections for a given section ID.
  */
-function findSectionIndex(bookDoc: BookDoc, sectionId: string | number | null): number {
+export function findSectionIndex(bookDoc: BookDoc, sectionId: string | number | null): number {
   if (sectionId == null) return -1;
   return bookDoc.sections.findIndex((s) => s.id === sectionId || s.id === String(sectionId));
 }

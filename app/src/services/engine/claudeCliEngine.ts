@@ -36,6 +36,9 @@ interface RustStartInfo {
   cwd: string;
 }
 
+/** The reader's tools, as the CLI names MCP tools: `mcp__<server>__<tool>`. */
+export const READER_TOOLS = ['search_book', 'get_pages', 'get_toc'].map((t) => `mcp__reader__${t}`);
+
 /**
  * Build the CLI argument list. Kept separate and pure so the Inspect overlay
  * and the tests can read exactly what will be launched.
@@ -46,8 +49,10 @@ interface RustStartInfo {
  * - `--tools ""` removes the 31 built-in tools, which cost ~11k tokens of system
  *   prompt per turn and would let the model read the book file directly.
  * - `--setting-sources project` keeps the user's personal plugins and skills out.
- * - `--strict-mcp-config` with no `--mcp-config` means no MCP server at all (the
- *   reader's own server arrives in a later task).
+ * - `--strict-mcp-config`: no MCP server but the reader's own, whose
+ *   `--mcp-config` the backend appends (it knows the app's path and the index).
+ * - `--allowedTools` pre-approves what is offered: with `--permission-prompts
+ *   none`, anything else would be refused.
  * - `--system-prompt-snapshot off` so an edited harness applies on the next
  *   conversation instead of being frozen for the session's lifetime.
  */
@@ -76,7 +81,11 @@ export const buildCliArgs = (options: EngineStartOptions): string[] => {
   ];
 
   // Pre-approving a tool only makes sense when one is available.
-  if (options.webSearch) args.push('--allowedTools', 'WebSearch');
+  const allowed = [
+    ...(options.webSearch ? ['WebSearch'] : []),
+    ...(options.readerTools ? READER_TOOLS : []),
+  ];
+  if (allowed.length) args.push('--allowedTools', allowed.join(','));
 
   if (options.model.effort) args.push('--effort', options.model.effort);
 
@@ -109,6 +118,7 @@ export class ClaudeCliEngine implements Engine {
   private chapterSent = '';
   /** Pages of a PDF already given to the model by this process. */
   private pagesSent = new Set<number>();
+  private notationSent = false;
   private turnCount = 0;
   private resumed = false;
   /** Last lines the CLI wrote to stderr: it explains failures there. */
@@ -138,12 +148,17 @@ export class ClaudeCliEngine implements Engine {
     this.session = options.resumeSessionId ?? null;
     this.chapterSent = '';
     this.pagesSent = new Set();
+    this.notationSent = false;
     this.turnCount = 0;
     this.resumed = Boolean(options.resumeSessionId);
     this.stderrTail = [];
 
     const args = buildCliArgs(options);
-    const harness = buildHarness({ ...options.harnessContext, webSearch: options.webSearch });
+    const harness = buildHarness({
+      ...options.harnessContext,
+      webSearch: options.webSearch,
+      readerTools: Boolean(options.readerTools),
+    });
 
     this.unlisten.push(
       await listen<LinePayload>('engine://line', ({ payload }) => {
@@ -172,6 +187,7 @@ export class ClaudeCliEngine implements Engine {
         bookKey: options.bookKey,
         args,
         harness,
+        readerTools: Boolean(options.readerTools),
       });
     } catch (error) {
       await this.detach();
@@ -199,11 +215,16 @@ export class ClaudeCliEngine implements Engine {
     }
     if (plan.includeChapter) this.chapterSent = chapterKeyOf(context);
     for (const p of plan.pages) this.pagesSent.add(p.page);
+    if (plan.includeNotation) this.notationSent = true;
     this.turnCount += 1;
   }
 
   plan(context: EngineContext): ContextPlan {
-    return planContext(context, { chapterKey: this.chapterSent, pages: this.pagesSent });
+    return planContext(context, {
+      chapterKey: this.chapterSent,
+      pages: this.pagesSent,
+      notation: this.notationSent,
+    });
   }
 
   /** Number of turns sent through this process, for diagnostics. */

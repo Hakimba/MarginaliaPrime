@@ -21,6 +21,25 @@ il consomme le quota de l'abonnement. Si le binaire `claude` n'est pas dans le `
 
 ---
 
+## Claude consulte tout le livre
+
+*(PR #15)*
+
+- **Claude cherche lui-même dans le livre** quand la question le demande (« où est défini ⊗ ? »,
+  « que dit le livre sur la loi de la variance totale ? ») : recherche d'un mot, d'une expression ou
+  d'un symbole, lecture de pages, table des matières. Il cite les pages où il a trouvé.
+- **Les pages citées sont cliquables** (PDF) : « p. 42 » dans une réponse amène le lecteur à la page.
+  Les numéros sont ceux du PDF, même quand le livre imprime les siens décalés.
+- **Ce qu'il a cherché s'affiche** au-dessus de sa réponse (« Recherche dans le livre : ⊗ »).
+- **Les symboles abîmés par l'extraction du PDF sont retrouvés** (∫ extrait en « Z », ≠ en « ̸ = ») ;
+  une correspondance incertaine est signalée comme telle.
+- **L'index du livre se construit tout seul** à la première ouverture, au repos, sans ralentir la
+  lecture (environ une minute pour 600 pages), avec sa progression dans la ligne de contexte ; il
+  n'est plus refait ensuite.
+- **La liste des notations du livre**, quand il en a une, est donnée à Claude en début de
+  conversation.
+- **Rien à installer** : les outils sont intégrés à l'application.
+
 ## Le modèle voit ce que tu vois, et tu vois ce qu'il reçoit
 
 *(PR #14)*
