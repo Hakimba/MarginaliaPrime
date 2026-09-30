@@ -328,6 +328,11 @@ export interface ChapterExtractionOptions {
    * both cheaper and closer to what the question is about.
    */
   pageWindow?: number;
+  /**
+   * Last section the reader may be shown (anti-spoiler): a top-level entry of
+   * a reflowable book can hold several chapter files ahead of the reader.
+   */
+  readUpToIdx?: number;
 }
 
 export async function extractChapterText(
@@ -391,6 +396,10 @@ export async function extractChapterText(
       }
       lastSectionIdx = Math.min(lastSectionIdx, firstIdx + maxSections - 1);
     }
+    const naturalLast = lastSectionIdx;
+    if (options.readUpToIdx != null && lastSectionIdx > options.readUpToIdx) {
+      lastSectionIdx = Math.max(firstIdx, options.readUpToIdx);
+    }
 
     for (let i = firstIdx; i <= lastSectionIdx; i++) {
       const section = bookDoc.sections[i];
@@ -405,7 +414,10 @@ export async function extractChapterText(
       // Determine start/end anchors for this section
       const sectionStartId = isFirstSection ? (start.fragment ?? null) : null;
       // Only apply end fragment if the end is in this same section
-      const sectionEndId = isLastSection && endSectionIdx !== -1 ? (end.fragment ?? null) : null;
+      const sectionEndId =
+        isLastSection && endSectionIdx !== -1 && lastSectionIdx === naturalLast
+          ? (end.fragment ?? null)
+          : null;
 
       const text = extractRangeText(doc, sectionStartId, sectionEndId);
       if (text) textParts.push(text);

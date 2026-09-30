@@ -151,6 +151,8 @@ pub fn run() {
             engine::engine_stop,
             book_index::book_index_load,
             book_index::book_index_write,
+            book_index::book_state_load,
+            book_index::book_state_write,
         ])
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
