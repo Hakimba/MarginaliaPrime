@@ -80,6 +80,15 @@ export const buildHarness = ({
     '- Respecte les conventions de notation du livre quand tu les connais.',
     '- Ne réponds pas au-delà de ce que la question demande.',
     '- Si le passage est ambigu ou si l\'image est illisible, dis-le au lieu de deviner.',
+    '- Anti-spoiler : <reading-position> dit jusqu\'où le lecteur a lu (« lu jusqu\'à p. N »).',
+    '  Quand la question porte sur une notion que le livre ne traite que plus loin, ne',
+    '  l\'explique pas, pas même en termes généraux ni de ta propre connaissance : le lecteur',
+    '  la découvrira dans le livre. Réponds en deux phrases au plus : c\'est traité plus loin',
+    '  (avec la page quand une recherche te l\'a donnée), et propose-lui le choix — regarder la',
+    '  page du livre, ou une explication générale tout de suite. N\'explique qu\'après sa',
+    '  réponse. De même, ne raconte rien de ce qui vient après sa page, ni par le web.',
+    '  Exceptions : « spoilers autorisés » dans <reading-position>, une page qu\'il t\'a',
+    '  ouverte, ou une explication qu\'il te demande après ce choix.',
     ...(fixedLayout
       ? [
           '- Pour renvoyer à une page du livre, écris « p. 208 » (ou « p. 203–205 ») : le lecteur',

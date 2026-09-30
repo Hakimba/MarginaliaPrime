@@ -65,6 +65,8 @@ import {
   findTopLevelAncestor,
 } from '@/services/chapterExtraction';
 import { ensureBookIndex } from '@/services/bookIndex';
+import { readingOf } from '@/store/chatStore';
+import { nextMaxPage } from '@/utils/readingProgress';
 import { perfMark, perfSpan } from '@/utils/perf';
 import { useSelectionProbe } from '../hooks/useSelectionProbe';
 import Spinner from '@/components/Spinner';
@@ -81,6 +83,8 @@ declare global {
 const CONTEXT_PAGE_WINDOW = 5;
 /** How far the reader may move from the window's centre before it follows. */
 const CONTEXT_PAGE_RECENTER = 2;
+/** Pages past the furthest read the window may reach, for the anti-spoiler. */
+const CONTEXT_PAGE_AHEAD = 2;
 
 const FoliateViewer: React.FC<{
   bookKey: string;
@@ -124,6 +128,7 @@ const FoliateViewer: React.FC<{
     sectionIdx?: number;
   } | null>(null);
   const chatOpen = useChatStore((s) => s.isOpen);
+  const bookHash = bookKey.split('-')[0] ?? '';
   /**
    * Fixed layout: the page the context window should be centred on, waiting
    * to be extracted, and the page the current window was centred on. The
@@ -152,13 +157,31 @@ const FoliateViewer: React.FC<{
     }
   };
 
+  /**
+   * Last section index the reader may be shown without asking: two past the
+   * furthest read, for a proof that runs over. Infinity with spoilers allowed
+   * or nothing recorded.
+   */
+  const readUpToIndex = (): number => {
+    const reading = readingOf(useChatStore.getState(), bookHash);
+    return reading && !reading.spoilersAllowed && reading.maxPage > 0
+      ? reading.maxPage - 1 + CONTEXT_PAGE_AHEAD
+      : Infinity;
+  };
+  /** The chapter text was cut at this section; reading past it extracts again. */
+  const chapterCut = useRef<number | null>(null);
+  /** The stored reading state has been read: the furthest page may move. */
+  const stateLoaded = useRef(false);
+
   const extractPendingWindow = () => {
     const center = pendingWindow.current;
     if (center === null) return;
     pendingWindow.current = null;
     const run = ++windowRun.current;
     const first = center - CONTEXT_PAGE_WINDOW;
-    const last = center + CONTEXT_PAGE_WINDOW;
+    // Not far past what the reader has read: the pages sent unasked must not
+    // tell what comes next. Two pages ahead, for a proof that runs over.
+    const last = Math.min(center + CONTEXT_PAGE_WINDOW, Math.max(center, readUpToIndex()));
     const endExtract = perfSpan('context:pages', { first: first + 1, last: last + 1 });
     const cache = pageTexts.current;
     extractPages(bookDoc, first, last, cache)
@@ -188,7 +211,12 @@ const FoliateViewer: React.FC<{
     pendingChapter.current = null;
     const { tocItem, toc, bookTitle, bookAuthor, chapterTitle, sectionIdx } = pending;
     const endExtract = perfSpan('chapter:extract', { chapter: chapterTitle });
-    extractChapterText(bookDoc, tocItem, toc, { currentSectionIdx: sectionIdx }).then((text) => {
+    const cut = readUpToIndex();
+    chapterCut.current = Number.isFinite(cut) ? cut : null;
+    extractChapterText(bookDoc, tocItem, toc, {
+      currentSectionIdx: sectionIdx,
+      ...(Number.isFinite(cut) ? { readUpToIdx: cut } : {}),
+    }).then((text) => {
       endExtract({ chars: text.length });
       if (disposed.current) return;
       useChatStore.getState().updateBookContext(bookTitle, bookAuthor, chapterTitle, text);
@@ -250,12 +278,105 @@ const FoliateViewer: React.FC<{
       endIndex({ pages: index?.pages.length ?? 0, complete: !!index?.complete });
       if (disposed.current) return;
       chat().setIndexStatus(null);
-      chat().setBookNotation(index?.notation ? { hash, text: index.notation } : null);
+      chat().setBookNotation(
+        index?.notation
+          ? {
+              hash,
+              text: index.notation,
+              ...(index.notationPage ? { page: index.notationPage } : {}),
+            }
+          : null,
+      );
     })().catch((e) => {
       console.warn('index: book index failed', e);
       if (!disposed.current) chat().setIndexStatus(null);
     });
   };
+
+  // The reading state, loaded once and written whenever it changes, for the
+  // tools to filter by. Page turns are written after a short pause.
+  useEffect(() => {
+    if (!bookHash) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let lastWritten = '';
+    // Nothing is written before the stored state is read: the first page turn
+    // would otherwise replace a further page read with the current one.
+    let loaded = false;
+    stateLoaded.current = false;
+    const writeNow = async () => {
+      if (!loaded) return;
+      const reading = readingOf(useChatStore.getState(), bookHash);
+      if (!reading) return;
+      const { hash: _hash, ...state } = reading;
+      const content = JSON.stringify(state);
+      if (content === lastWritten) return;
+      const { invoke } = await import('@tauri-apps/api/core');
+      try {
+        await invoke('book_state_write', {
+          hash: bookHash,
+          content: JSON.stringify({ ...state, updatedAt: Date.now() }),
+        });
+        lastWritten = content;
+      } catch (e) {
+        console.warn('reading state: write failed', e);
+      }
+    };
+    // One write at a time, in order: two in flight could land the older last.
+    let chain = Promise.resolve();
+    const write = () => {
+      chain = chain.then(writeNow);
+      return chain;
+    };
+    void (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const raw = await invoke<string | null>('book_state_load', { hash: bookHash });
+        if (cancelled) return;
+        loaded = true;
+        stateLoaded.current = true;
+        if (!raw) {
+          // A book never read here: it starts at the page on screen.
+          const current = readingOf(useChatStore.getState(), bookHash);
+          if (current?.currentPage) {
+            useChatStore.getState().updateReading(bookHash, { maxPage: current.currentPage });
+          }
+          void write();
+          return;
+        }
+        const stored = JSON.parse(raw) as { maxPage?: number; spoilersAllowed?: boolean };
+        const current = readingOf(useChatStore.getState(), bookHash);
+        useChatStore.getState().updateReading(bookHash, {
+          // The stored value, not the page the book reopened on: that may be
+          // the index where the reader last looked something up.
+          maxPage: stored.maxPage || current?.currentPage || 0,
+          spoilersAllowed: Boolean(stored.spoilersAllowed),
+          // A window opened for a turn never outlives the app.
+          allowedWindow: null,
+        });
+      } catch (e) {
+        // Left unwritten: a page turn must not replace a state that could
+        // not be read with a smaller one.
+        console.warn('reading state: load failed', e);
+      }
+    })();
+    const unsubscribe = useChatStore.subscribe((s, before) => {
+      const now = s.readings[bookHash];
+      const was = before.readings[bookHash];
+      if (!now || now === was) return;
+      const urgent =
+        now.allowedWindow !== was?.allowedWindow || now.spoilersAllowed !== was?.spoilersAllowed;
+      if (timer) clearTimeout(timer);
+      // A permission is written at once: the question follows right after.
+      timer = setTimeout(() => void write(), urgent ? 0 : 400);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      if (timer) clearTimeout(timer);
+      void write();
+    };
+  }, [bookHash]);
 
   useEffect(() => {
     disposed.current = false;
@@ -335,6 +456,21 @@ const FoliateViewer: React.FC<{
       // units (135 / 278 on page 202 of 417).
       const isFixed = bookDoc.rendition?.layout === 'pre-paginated';
       const pageIndex = (detail.section as PageInfo | undefined)?.current;
+      // The furthest page read, for the anti-spoiler (rule and reasons in
+      // utils/readingProgress.ts).
+      if (pageIndex !== undefined) {
+        const reading = readingOf(useChatStore.getState(), bookHash);
+        useChatStore.getState().updateReading(bookHash, {
+          currentPage: pageIndex + 1,
+          maxPage: nextMaxPage({
+            known: reading?.maxPage ?? 0,
+            previous: reading?.currentPage ?? 0,
+            page: pageIndex + 1,
+            loaded: stateLoaded.current,
+          }),
+          fixedLayout: isFixed,
+        });
+      }
       useChatStore
         .getState()
         .setPosition(
@@ -384,6 +520,24 @@ const FoliateViewer: React.FC<{
         };
         useChatStore.getState().setContextPending(true);
         // Extract now only if the chat is open; otherwise defer until it opens.
+        if (useChatStore.getState().isOpen) runChapterExtraction();
+      } else if (
+        !pendingChapter.current &&
+        chapterCut.current !== null &&
+        ((detail.section as PageInfo | undefined)?.current ?? 0) + CONTEXT_PAGE_AHEAD >
+          chapterCut.current
+      ) {
+        // Same chapter, but the text sent stops near where the reader now is:
+        // extract it again, up to the new furthest section.
+        pendingChapter.current = {
+          tocItem: detail.tocItem,
+          toc,
+          bookTitle,
+          bookAuthor,
+          chapterTitle,
+          sectionIdx: (detail.section as PageInfo | undefined)?.current,
+        };
+        useChatStore.getState().setContextPending(true);
         if (useChatStore.getState().isOpen) runChapterExtraction();
       } else if (pendingChapter.current) {
         // Same chapter, extraction still deferred: keep the window centered on the reader

@@ -10,7 +10,7 @@ import {
   pageRanges,
   planContext,
 } from './harness';
-import { parseCliLine } from './parseCliEvent';
+import { parseCliLine, unreadPagesOf } from './parseCliEvent';
 import type { EngineContext, EngineStartOptions } from './types';
 
 /**
@@ -64,6 +64,25 @@ describe('parseCliLine', () => {
     ]);
   });
 
+  it('carries what a tool returned, and the unread pages it offers', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 't1',
+            content: [{ type: 'text', text: 'Plus loin…\n[non-lu: 209, 215]\n' }],
+          },
+        ],
+      },
+    });
+    const [result] = parseCliLine(line);
+    expect(result).toMatchObject({ kind: 'tool_result', id: 't1', isError: false });
+    expect(unreadPagesOf((result as { text: string }).text)).toEqual([209, 215]);
+    expect(unreadPagesOf('rien de caché')).toEqual([]);
+  });
+
   it('reports whether the reader tools connected', () => {
     const line = JSON.stringify({
       type: 'system',
@@ -95,10 +114,10 @@ describe('parseCliLine', () => {
     expect(parseCliLine(recorded.replay)).toEqual([
       { kind: 'user_replay', content: [{ type: 'text', text: 'Reponds exactement: PONG' }] },
     ]);
-    expect(parseCliLine(recorded.toolResult)).toEqual([
+    expect(parseCliLine(recorded.toolResult)).toMatchObject([
       { kind: 'tool_result', id: 'toolu_1', isError: false },
     ]);
-    expect(parseCliLine(recorded.toolResultError)).toEqual([
+    expect(parseCliLine(recorded.toolResultError)).toMatchObject([
       { kind: 'tool_result', id: 'toolu_1', isError: true },
     ]);
   });
@@ -408,6 +427,13 @@ describe('buildHarness', () => {
   it('separates the messages of a turn that used a tool', () => {
     const line = '{"type":"stream_event","event":{"type":"message_start","message":{}}}';
     expect(parseCliLine(line)).toEqual([{ kind: 'message_start' }]);
+  });
+
+  it('keeps the model from revealing what comes after the page read', () => {
+    const harness = buildHarness({ bookTitle: '', bookAuthor: '', webSearch: false });
+    expect(harness).toContain('Anti-spoiler');
+    expect(harness).toContain('lu jusqu');
+    expect(harness).toContain('spoilers');
   });
 
   it('mentions web search only when it is enabled', () => {

@@ -39,6 +39,8 @@ export interface BookIndex {
   pages: { page: number; label?: string; text: string }[];
   /** The book's own list of notations, when its table of contents has one. */
   notation?: string;
+  /** Its first page: sent only if the reader may see it (anti-spoiler). */
+  notationPage?: number;
 }
 
 export interface IndexStorage {
@@ -165,7 +167,11 @@ export const ensureBookIndex = async (
   }
   index.complete = true;
   const notation = findNotation(index);
-  if (notation) index.notation = notation;
+  if (notation) {
+    index.notation = notation;
+    const entry = index.toc.find((e) => e.page !== null && NOTATION_TITLE.test(e.label));
+    if (entry?.page) index.notationPage = entry.page;
+  }
   await storage.write(book.hash, JSON.stringify(index));
   run.onProgress?.(total, total);
   return index;
