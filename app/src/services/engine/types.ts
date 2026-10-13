@@ -75,7 +75,7 @@ export type EngineEvent =
   /** The model started using a tool. */
   | { kind: 'tool_use'; id: string; name: string; input?: unknown }
   /** A tool returned. */
-  | { kind: 'tool_result'; id?: string; isError: boolean }
+  | { kind: 'tool_result'; id?: string; isError: boolean; text?: string }
   /** The turn finished. `text` is the CLI's authoritative final answer. */
   | { kind: 'done'; text: string; usage?: EngineUsage; costUsd?: number }
   /** The turn or the process failed. Recoverable unless `fatal`. */

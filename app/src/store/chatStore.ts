@@ -28,6 +28,27 @@ const samePassage = (a: PendingSelection, b: NewSelection): boolean =>
   a.section === b.section &&
   a.label === b.label;
 
+/**
+ * How far the reader has gone in a book, and what they let the model read
+ * beyond it. Written next to the book index for the tools, which filter by it.
+ */
+export interface ReadingState {
+  hash: string;
+  /** Furthest page (section) read, 1-based. */
+  maxPage: number;
+  currentPage: number;
+  /** The model may read ahead: a book read before. Kept per book. */
+  spoilersAllowed: boolean;
+  /** Pages opened for the next turn only, beyond the furthest read. */
+  allowedWindow: [number, number] | null;
+  /** A PDF counts pages; a reflowable book, sections. */
+  fixedLayout: boolean;
+}
+
+/** The reading state of a book, if it has one. */
+export const readingOf = (s: { readings: Record<string, ReadingState> }, hash: string) =>
+  s.readings[hash] ?? null;
+
 interface ChatState {
   isOpen: boolean;
   isPinned: boolean;
@@ -51,8 +72,10 @@ interface ChatState {
   contextPending: boolean;
   /** Progress of the book index the tools search, while it is being built. */
   indexStatus: { hash: string; done: number; total: number } | null;
+  /** Reading state of each open book, for the anti-spoiler. */
+  readings: Record<string, ReadingState>;
   /** The book's list of notations, sent with the first message, by book. */
-  bookNotation: { hash: string; text: string } | null;
+  bookNotation: { hash: string; text: string; page?: number } | null;
   /** Reading position label, e.g. "p. 30 / 417". */
   position: string;
   /**
@@ -87,7 +110,9 @@ interface ChatState {
   releaseContext: (owner: string) => void;
   setContextPending: (pending: boolean) => void;
   setIndexStatus: (status: { hash: string; done: number; total: number } | null) => void;
-  setBookNotation: (notation: { hash: string; text: string } | null) => void;
+  setBookNotation: (notation: { hash: string; text: string; page?: number } | null) => void;
+  /** Merge into the reading state of `hash`; a new book starts a new state. */
+  updateReading: (hash: string, change: Partial<Omit<ReadingState, 'hash'>>) => void;
   updateBookContext: (title: string, author: string, chapter: string, chapterText: string) => void;
   setPosition: (position: string) => void;
   requestChapter: () => void;
@@ -122,6 +147,7 @@ export const useChatStore = create<ChatState>()(
       contextPending: false,
       indexStatus: null,
       bookNotation: null,
+      readings: {},
       position: '',
       chapterRequest: 0,
       askRequest: null,
@@ -180,6 +206,18 @@ export const useChatStore = create<ChatState>()(
       setContextPending: (pending) => set({ contextPending: pending }),
       setIndexStatus: (status) => set({ indexStatus: status }),
       setBookNotation: (notation) => set({ bookNotation: notation }),
+      updateReading: (hash, change) =>
+        set((s) => {
+          const base: ReadingState = s.readings[hash] ?? {
+            hash,
+            maxPage: 0,
+            currentPage: 0,
+            spoilersAllowed: false,
+            allowedWindow: null,
+            fixedLayout: true,
+          };
+          return { readings: { ...s.readings, [hash]: { ...base, ...change } } };
+        }),
       updateBookContext: (title, author, chapter, chapterText) =>
         set({
           bookTitle: title,

@@ -18,5 +18,5 @@ export {
   pageRanges,
   planContext,
 } from './harness';
-export { parseCliEvent, parseCliLine } from './parseCliEvent';
+export { parseCliEvent, parseCliLine, unreadPagesOf } from './parseCliEvent';
 export { ENGINE_BACKENDS, DEFAULT_BACKEND_ID, DEFAULT_MODEL_ID, findModel } from './catalog';

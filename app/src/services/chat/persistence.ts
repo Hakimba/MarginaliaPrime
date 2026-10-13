@@ -17,6 +17,8 @@ interface ChatMessage {
   timestamp: number;
   /** For answers: what the model looked up in the book, in plain words. */
   tools?: string[];
+  /** For answers: pages beyond the furthest read the reader may open. */
+  unread?: number[];
   /** For user messages with a book selection — displayed as a compact quote */
   selection?: {
     text: string;

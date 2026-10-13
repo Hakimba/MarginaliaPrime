@@ -29,6 +29,41 @@ pub fn index_path(app: &AppHandle, hash: &str) -> Result<PathBuf, String> {
         .join(format!("{}.json", checked_hash(hash)?)))
 }
 
+/// Where the reading state the tools filter by is kept, beside the index.
+fn state_path(app: &AppHandle, hash: &str) -> Result<PathBuf, String> {
+    let index = index_path(app, hash)?;
+    Ok(index.with_file_name(format!("{}.state.json", checked_hash(hash)?)))
+}
+
+/// The reading state of a book (furthest page read, permissions), if any.
+#[tauri::command]
+pub async fn book_state_load(app: AppHandle, hash: String) -> Result<Option<String>, String> {
+    let path = state_path(&app, &hash)?;
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+    }
+}
+
+/// Store the reading state; the tools read it at every call.
+#[tauri::command]
+pub async fn book_state_write(app: AppHandle, hash: String, content: String) -> Result<(), String> {
+    let path = state_path(&app, &hash)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    let partial = path.with_extension(format!(
+        "json.{}.{}.part",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&partial, content)
+        .map_err(|e| format!("cannot write {}: {e}", partial.display()))?;
+    std::fs::rename(&partial, &path).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 /// The stored index, or None when the book has none yet.
 #[tauri::command]
 pub async fn book_index_load(app: AppHandle, hash: String) -> Result<Option<String>, String> {

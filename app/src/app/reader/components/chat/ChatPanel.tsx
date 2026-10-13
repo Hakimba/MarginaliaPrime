@@ -8,12 +8,28 @@ import React, {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import { FiCode, FiGlobe, FiImage, FiPlus, FiSearch, FiSend, FiTrash2, FiX } from 'react-icons/fi';
+import {
+  FiCode,
+  FiEye,
+  FiEyeOff,
+  FiGlobe,
+  FiImage,
+  FiPlus,
+  FiSearch,
+  FiSend,
+  FiTrash2,
+  FiX,
+} from 'react-icons/fi';
 import { BsPin, BsPinFill } from 'react-icons/bs';
 import clsx from 'clsx';
 import 'katex/dist/katex.min.css';
 
-import { useChatStore, type PendingSelection } from '@/store/chatStore';
+import {
+  readingOf,
+  useChatStore,
+  type PendingSelection,
+  type ReadingState,
+} from '@/store/chatStore';
 import { perfMark } from '@/utils/perf';
 import { useSidebarStore } from '@/store/sidebarStore';
 import { useReaderStore } from '@/store/readerStore';
@@ -27,6 +43,7 @@ import {
   findModel,
   pageRanges,
   planContext,
+  unreadPagesOf,
 } from '@/services/engine';
 import type {
   ContextPlan,
@@ -174,13 +191,28 @@ const SentPassages: React.FC<{ items: SentItem[] }> = ({ items }) => {
  */
 const ContextLine: React.FC<{
   position: string;
+  /** « lu jusqu'à p. 30 »: a button when the page on screen differs. */
+  readNote: string;
+  readTitle: string;
+  onSetRead: () => void;
   chapter: string;
   pending: boolean;
   index: { done: number; total: number } | null;
   plan: ContextPlan;
   hasPages: boolean;
   hasChapter: boolean;
-}> = ({ position, chapter, pending, index, plan, hasPages, hasChapter }) => {
+}> = ({
+  position,
+  readNote,
+  readTitle,
+  onSetRead,
+  chapter,
+  pending,
+  index,
+  plan,
+  hasPages,
+  hasChapter,
+}) => {
   const sent = plan.pages.length
     ? `p. ${pageRanges(plan.pages.map((p) => p.page))} jointes`
     : plan.includeChapter
@@ -197,13 +229,32 @@ const ContextLine: React.FC<{
     // The tools search what is indexed so far: say how far that is.
     index && index.total ? `index du livre ${Math.floor((100 * index.done) / index.total)} %` : '',
   ].filter(Boolean);
-  if (!parts.length) return null;
+  if (!parts.length && !readNote) return null;
+  const text = parts.join(' · ');
   return (
     <div
-      className='text-base-content/50 border-base-300 truncate border-t px-3 pt-1.5 text-[11px]'
-      title={parts.join(' · ')}
+      className='text-base-content/50 border-base-300 flex items-center gap-1 border-t px-3 pt-1.5 text-[11px]'
+      title={[text, readNote].filter(Boolean).join(' · ')}
     >
-      {parts.join(' · ')}
+      <span className='min-w-0 truncate'>{text}</span>
+      {readNote &&
+        (readTitle ? (
+          // The reader skipped ahead to read, or wants to correct: one click
+          // sets the furthest page read to the page on screen.
+          <button
+            className='hover:text-base-content shrink-0 underline decoration-dotted'
+            onClick={onSetRead}
+            title={readTitle}
+          >
+            {text ? '· ' : ''}
+            {readNote}
+          </button>
+        ) : (
+          <span className='shrink-0'>
+            {text ? '· ' : ''}
+            {readNote}
+          </span>
+        ))}
     </div>
   );
 };
@@ -240,6 +291,32 @@ const findPassage = (doc: Document, wanted: string): Range | null => {
   range.setEnd(last.node, last.offset + 1);
   return range;
 };
+
+/** « lu jusqu'à p. 35 », or « spoilers autorisés »: what the model may reveal. */
+const readingNote = (reading: ReadingState | null): string => {
+  if (!reading || reading.maxPage <= 0) return '';
+  if (reading.spoilersAllowed) return 'spoilers autorisés';
+  const unit = reading.fixedLayout ? 'p.' : 'section';
+  const opened = reading.allowedWindow
+    ? ` (ouvertes pour cette question : ${unit} ${reading.allowedWindow[0]}–${reading.allowedWindow[1]})`
+    : '';
+  return `lu jusqu'à ${unit} ${reading.maxPage}${opened}`;
+};
+
+/** Pages two past the furthest read are sent unasked (see FoliateViewer). */
+const READ_AHEAD = 2;
+
+/** Whether the model may be given this page now. */
+const mayShow = (reading: ReadingState | null, page: number): boolean => {
+  if (!reading || reading.maxPage <= 0 || reading.spoilersAllowed) return true;
+  if (page <= reading.maxPage + READ_AHEAD) return true;
+  const w = reading.allowedWindow;
+  return Boolean(w && page >= w[0] && page <= w[1]);
+};
+
+/** "p. 209" or "section 12", as the book counts. */
+const unitLabel = (reading: ReadingState | null, n: number): string =>
+  reading && !reading.fixedLayout ? `section ${n}` : `p. ${n}`;
 
 /** Whether the book the panel talks about is a PDF, whose pages links go to. */
 const currentFixedLayout = (): boolean => {
@@ -311,6 +388,7 @@ const ChatPanel: React.FC = () => {
     contextPages,
     contextPending,
     indexStatus,
+    readings,
     position,
     bookTitle,
     bookAuthor,
@@ -429,6 +507,8 @@ const ChatPanel: React.FC = () => {
   const accumulated = useRef('');
   /** What the model looked up during the turn in progress. */
   const turnTools = useRef<string[]>([]);
+  /** Unread pages the tools offered during the turn in progress. */
+  const turnUnread = useRef<number[]>([]);
   /** The reader tools were asked for, and whether their absence was reported. */
   const toolsReported = useRef(false);
   /**
@@ -582,6 +662,17 @@ const ChatPanel: React.FC = () => {
     };
   }, [messages, bookHash, conversationId, sessionId]);
 
+  /**
+   * Pages the reader opened for a question close with the turn, however it
+   * ends: a failed or aborted turn must not leave them open for the next.
+   */
+  const closeOpenedPages = () => {
+    const s = useChatStore.getState();
+    for (const reading of Object.values(s.readings)) {
+      if (reading.allowedWindow) s.updateReading(reading.hash, { allowedWindow: null });
+    }
+  };
+
   const onEngineEvent = useCallback((event: EngineEvent) => {
     const line = `${event.kind}: ${summarize(event)}`;
     setRawLines((prev) => [...prev.slice(-199), line]);
@@ -626,6 +717,11 @@ const ChatPanel: React.FC = () => {
       }
       case 'tool_result':
         setActiveTool(null);
+        if (event.text) {
+          for (const page of unreadPagesOf(event.text)) {
+            if (!turnUnread.current.includes(page)) turnUnread.current.push(page);
+          }
+        }
         break;
       case 'done': {
         const tools = turnTools.current;
@@ -636,6 +732,10 @@ const ChatPanel: React.FC = () => {
             ? accumulated.current.trim()
             : event.text || accumulated.current;
         turnTools.current = [];
+        const unread = turnUnread.current.slice(0, 3);
+        turnUnread.current = [];
+        // A page opened for this turn closes with it.
+        closeOpenedPages();
         accumulated.current = '';
         setStreamingContent('');
         setIsStreaming(false);
@@ -652,6 +752,7 @@ const ChatPanel: React.FC = () => {
               content: text,
               timestamp: Date.now(),
               ...(tools.length ? { tools } : {}),
+              ...(unread.length ? { unread } : {}),
             },
           ]);
         } else {
@@ -676,6 +777,7 @@ const ChatPanel: React.FC = () => {
         // an API error is reported as-is: replaying it would spend the quota
         // twice and fail the same way.
         if (!/API Error/i.test(event.message) && retryWithoutResume()) break;
+        closeOpenedPages();
         reportError(event.message);
         accumulated.current = '';
         setStreamingContent('');
@@ -685,6 +787,7 @@ const ChatPanel: React.FC = () => {
         break;
       case 'exit':
         if (event.code !== 0 && retryWithoutResume()) break;
+        closeOpenedPages();
         setIsStreaming(false);
         setActiveTool(null);
         // A clean exit after an answer is normal; a mid-turn exit is not.
@@ -815,9 +918,15 @@ const ChatPanel: React.FC = () => {
       bookAuthor: s.bookAuthor,
       chapterTitle: s.currentChapter,
       chapterText: s.currentChapterText,
-      notation: s.bookNotation?.hash === s.bookHash ? s.bookNotation.text : '',
-      pages: s.contextPages,
-      position: s.position,
+      notation:
+        s.bookNotation?.hash === s.bookHash &&
+        mayShow(readingOf(s, s.bookHash), s.bookNotation.page ?? 1)
+          ? s.bookNotation.text
+          : '',
+      // Never past what the reader may see: pages extracted while spoilers
+      // were allowed stay in the store after they are turned off.
+      pages: s.contextPages.filter((p) => mayShow(readingOf(s, s.bookHash), p.page)),
+      position: [s.position, readingNote(readingOf(s, s.bookHash))].filter(Boolean).join(' · '),
       selections: s.pendingSelections.map(toEngineSelection),
     };
   }, []);
@@ -874,7 +983,10 @@ const ChatPanel: React.FC = () => {
     resumeRetried.current = false;
 
     const engine = await ensureEngine();
-    if (!engine) return;
+    if (!engine) {
+      closeOpenedPages();
+      return;
+    }
     // What the model gets is what the transcript shows, even if another
     // selection arrived while the engine was starting.
     const selections = context.selections;
@@ -910,11 +1022,13 @@ const ChatPanel: React.FC = () => {
     setStreamingContent('');
     accumulated.current = '';
     turnTools.current = [];
+    turnUnread.current = [];
     setError(null);
 
     try {
       await engine.send(text, context);
     } catch (e) {
+      closeOpenedPages();
       setError(e instanceof Error ? e.message : String(e));
       setIsStreaming(false);
     }
@@ -961,6 +1075,7 @@ const ChatPanel: React.FC = () => {
   };
 
   const handleAbort = () => {
+    closeOpenedPages();
     void stopEngine();
     setIsStreaming(false);
     setStreamingContent('');
@@ -1071,6 +1186,8 @@ const ChatPanel: React.FC = () => {
    *   toggleimg:<k>    take the image of pending passage k out, or back in
    *   remove:<k>       remove pending passage k;  clear: remove them all
    *   clicklink        click the last page link of the answers
+   *   openunread       click the first "Regarder p. N" button (asks at once)
+   *   spoilers:on|off  allow reading ahead, or not
    *   abort            stop the engine
    *   wait:<ms>        pause
    * Everything else is asked as a question. This is the only way to exercise
@@ -1157,6 +1274,27 @@ const ChatPanel: React.FC = () => {
       next();
       return;
     }
+    if (step === 'openunread') {
+      // The first "Regarder p. N" button of the last answer, as the reader would.
+      const button = [...document.querySelectorAll<HTMLButtonElement>('.chat-panel button')].find(
+        (b) => b.textContent?.startsWith('Regarder p.'),
+      );
+      console.info(`smoke: ${button ? button.textContent : 'no unread button'}`);
+      if (button) button.click();
+      else next();
+      return;
+    }
+    if (step.startsWith('spoilers:')) {
+      const current = readingOf(useChatStore.getState(), useChatStore.getState().bookHash);
+      if (current) {
+        useChatStore
+          .getState()
+          .updateReading(current.hash, { spoilersAllowed: step === 'spoilers:on' });
+      }
+      console.info(`smoke: spoilers ${step.slice(9)}, read up to ${current?.maxPage}`);
+      setTimeout(() => void runSmokeStepRef.current?.(), 600);
+      return;
+    }
     if (step === 'clicklink') {
       // The first page link of the last answer, clicked as the reader would.
       const links = document.querySelectorAll<HTMLAnchorElement>('.chat-panel a.page-ref');
@@ -1221,6 +1359,22 @@ const ChatPanel: React.FC = () => {
     };
   };
 
+  /** The reader opens a page ahead of what they read, for one question. */
+  const openUnread = (page: number) => {
+    const current = readingOf(useChatStore.getState(), bookHash);
+    if (!current || isStreaming || sending.current) return;
+    useChatStore.getState().updateReading(current.hash, { allowedWindow: [page, page + 1] });
+    void handleSendRef.current?.(`Oui, tu peux regarder la ${unitLabel(current, page)}.`);
+  };
+
+  const toggleSpoilers = () => {
+    const current = readingOf(useChatStore.getState(), bookHash);
+    if (!current) return;
+    useChatStore.getState().updateReading(current.hash, {
+      spoilersAllowed: !current.spoilersAllowed,
+    });
+  };
+
   /** « p. 208 » in an answer: take the reader there. PDF only, pages being pages. */
   const handlePageLink = (e: React.MouseEvent<HTMLDivElement>) => {
     const link = (e.target as HTMLElement).closest?.('a.page-ref') as HTMLAnchorElement | null;
@@ -1242,6 +1396,7 @@ const ChatPanel: React.FC = () => {
 
   if (!isOpen) return null;
 
+  const reading = readings[bookHash] ?? null;
   const contextPlan = nextPlan(buildContext());
   const pageLinks = currentFixedLayout();
 
@@ -1265,6 +1420,23 @@ const ChatPanel: React.FC = () => {
       <div className='border-base-300 flex items-center gap-1 border-b px-3 py-2'>
         <ModelSelector />
         <div className='flex-1' />
+        {reading && (
+          <button
+            className={clsx(
+              'btn btn-ghost btn-xs btn-square',
+              reading.spoilersAllowed && 'text-warning',
+            )}
+            onClick={toggleSpoilers}
+            title={
+              reading.spoilersAllowed
+                ? 'Spoilers autorisés : Claude peut lire tout le livre. Cliquer pour le limiter à ce que tu as lu (ce qu’il a déjà lu dans cette conversation, il s’en souvient : ouvre-en une nouvelle).'
+                : `Anti-spoiler : Claude ne lit pas au-delà de la ${unitLabel(reading, reading.maxPage)}. Cliquer pour tout autoriser (relecture).`
+            }
+            aria-pressed={reading.spoilersAllowed}
+          >
+            {reading.spoilersAllowed ? <FiEye size={14} /> : <FiEyeOff size={14} />}
+          </button>
+        )}
         <button
           className='btn btn-ghost btn-xs btn-square'
           onClick={() => setShowInspect(true)}
@@ -1365,6 +1537,22 @@ const ChatPanel: React.FC = () => {
                     items={itemsOf(messages[i - 1])}
                     pageLinks={pageLinks}
                   />
+                  {/* Pages ahead the tools found: the reader decides. Only on
+                      the last answer, the one the next question follows. */}
+                  {msg.unread?.length && i === messages.length - 1 && !isStreaming ? (
+                    <div className='mt-2 flex flex-wrap gap-1'>
+                      {msg.unread.map((page) => (
+                        <button
+                          key={page}
+                          className='btn btn-xs btn-outline'
+                          onClick={() => openUnread(page)}
+                          title={`Laisser Claude lire ${unitLabel(reading, page)} et la suivante, pour cette question seulement`}
+                        >
+                          Regarder {unitLabel(reading, page)}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                 </>
               )}
             </div>
@@ -1490,6 +1678,15 @@ const ChatPanel: React.FC = () => {
 
       <ContextLine
         position={position}
+        readNote={readingNote(reading)}
+        readTitle={
+          reading && !reading.spoilersAllowed && reading.currentPage !== reading.maxPage
+            ? `Marquer comme lu jusqu'à la page affichée (${unitLabel(reading, reading.currentPage)})`
+            : ''
+        }
+        onSetRead={() => {
+          if (reading) useChatStore.getState().updateReading(reading.hash, { maxPage: reading.currentPage });
+        }}
         chapter={currentChapter}
         pending={contextPending}
         index={indexStatus?.hash === bookHash ? indexStatus : null}

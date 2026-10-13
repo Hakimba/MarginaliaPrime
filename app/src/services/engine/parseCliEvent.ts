@@ -103,6 +103,7 @@ export const parseCliEvent = (msg: Record<string, unknown>): EngineEvent[] => {
         kind: 'tool_result' as const,
         id: b.tool_use_id,
         isError: b.is_error === true,
+        ...(toolResultText(b) ? { text: toolResultText(b) } : {}),
       }));
     }
     // Replayed copy of what we sent: the Inspect overlay shows it verbatim.
@@ -158,6 +159,22 @@ const messageContent = (msg: Record<string, unknown>): ContentBlock[] => {
   const message = msg['message'] as Record<string, unknown> | undefined;
   const content = message?.['content'];
   return Array.isArray(content) ? (content as ContentBlock[]) : [];
+};
+
+/** The text a tool returned: a string, or a list of text blocks. */
+const toolResultText = (block: ContentBlock): string => {
+  const content = (block as { content?: unknown }).content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((c) => (c && typeof c === 'object' && typeof c.text === 'string' ? c.text : ''))
+    .join('\n');
+};
+
+/** Pages the reader tools offer to open, from their `[non-lu: 209, 215]` line. */
+export const unreadPagesOf = (text: string): number[] => {
+  const m = /\[non-lu: ([\d, ]+)\]/.exec(text);
+  return m ? m[1]!.split(',').map((n) => Number(n.trim())).filter((n) => n > 0) : [];
 };
 
 const numberOr = (value: unknown): number | undefined =>

@@ -65,6 +65,52 @@ pub struct IndexedPage {
     pub text: String,
 }
 
+/// Where the reader is, written by the app next to the index at every page
+/// turn and every change of permission, and read again at every call: the
+/// CLI's process outlives any environment given to it at launch.
+#[derive(Deserialize, Default, Clone, Debug)]
+pub struct ReadingState {
+    /// The furthest page read. None: nothing known, nothing hidden.
+    #[serde(default, rename = "maxPage")]
+    pub max_page: Option<usize>,
+    #[serde(default, rename = "currentPage")]
+    pub current_page: Option<usize>,
+    /// The reader lets the model read ahead (a book read before).
+    #[serde(default, rename = "spoilersAllowed")]
+    pub spoilers_allowed: bool,
+    /// Pages the reader opened for this turn only, beyond the furthest read.
+    #[serde(default, rename = "allowedWindow")]
+    pub allowed_window: Option<[usize; 2]>,
+}
+
+/// Pages past the furthest read the model may see: the app sends them with
+/// the reading context already (a proof that runs over, the facing page).
+const AHEAD: usize = 2;
+
+impl ReadingState {
+    /// The furthest page read, when known: 0 means nothing was recorded.
+    fn max(&self) -> Option<usize> {
+        self.max_page.filter(|&m| m > 0)
+    }
+
+    /// Whether the model may be shown this page.
+    pub fn visible(&self, page: usize) -> bool {
+        self.spoilers_allowed
+            || self.max().map_or(true, |max| page <= max + AHEAD)
+            || self
+                .allowed_window
+                .is_some_and(|[from, to]| page >= from && page <= to)
+    }
+
+    fn unread_note(&self, index: &BookIndex) -> String {
+        match self.max() {
+            Some(max) if index.is_pdf() => format!("au-delà de la p. {max}"),
+            Some(max) => format!("au-delà de la section {max}"),
+            None => String::new(),
+        }
+    }
+}
+
 impl BookIndex {
     fn is_pdf(&self) -> bool {
         self.unit != "section"
@@ -339,13 +385,31 @@ fn hits_in(text: &str, needle_plain: &[char], needle_repaired: &[char]) -> Vec<H
     hits
 }
 
-pub fn search(index: &BookIndex, query: &str, max_results: usize) -> String {
+/// The section around `page`, from the table of contents: [start, end).
+fn section_around(index: &BookIndex, page: usize) -> (usize, usize) {
+    let starts: Vec<usize> = index.toc.iter().filter_map(|e| e.page).collect();
+    let start = starts
+        .iter()
+        .copied()
+        .filter(|&p| p <= page)
+        .max()
+        .unwrap_or(1);
+    let end = starts
+        .iter()
+        .copied()
+        .filter(|&p| p > start)
+        .min()
+        .unwrap_or(usize::MAX);
+    (start, end)
+}
+
+pub fn search(index: &BookIndex, query: &str, max_results: usize, state: &ReadingState) -> String {
     let needle_plain = Compact::of(query, false).chars;
     let needle_repaired = Compact::of(query, true).chars;
     if needle_plain.is_empty() {
         return "Recherche vide : donne un mot, une expression ou un symbole.".to_string();
     }
-    let mut pages: Vec<PageHits> = index
+    let pages: Vec<PageHits> = index
         .pages
         .iter()
         .enumerate()
@@ -369,6 +433,10 @@ pub fn search(index: &BookIndex, query: &str, max_results: usize) -> String {
         })
         .collect();
 
+    // What the reader has not reached is counted, never shown.
+    let (mut pages, mut hidden): (Vec<PageHits>, Vec<PageHits>) = pages
+        .into_iter()
+        .partition(|p| state.visible(index.pages[p.index].page));
     let total: usize = pages.iter().map(|p| p.hits.len()).sum();
     let mut out = index.numbering_note();
     if !index.complete {
@@ -379,12 +447,33 @@ pub fn search(index: &BookIndex, query: &str, max_results: usize) -> String {
             index.page_count.max(index.pages.len()),
         ));
     }
+    hidden.sort_by_key(|p| (!p.exact, !p.definition, p.index));
+    let unread = unread_summary(index, state, &hidden);
     if pages.is_empty() {
-        out.push_str(&format!("Aucune occurrence de « {query} » dans le livre."));
+        if hidden.is_empty() {
+            out.push_str(&format!("Aucune occurrence de « {query} » dans le livre."));
+        } else {
+            out.push_str(&format!(
+                "Aucune occurrence de « {query} » dans ce que le lecteur a lu.\n"
+            ));
+            out.push_str(&unread);
+        }
         return out;
     }
-    // Sure matches first, definitions among them first, then book order.
-    pages.sort_by_key(|p| (!p.exact, !p.definition, p.index));
+    // Sure matches first. Near the reader first (the same symbol may mean
+    // another thing elsewhere), definitions first among equals, then the
+    // closest pages; without a position, book order.
+    match state.current_page {
+        Some(current) => {
+            let (start, end) = section_around(index, current);
+            pages.sort_by_key(|p| {
+                let page = index.pages[p.index].page;
+                let near = (page >= start && page < end) || page.abs_diff(current) <= 3;
+                (!p.exact, !near, !p.definition, page.abs_diff(current))
+            });
+        }
+        None => pages.sort_by_key(|p| (!p.exact, !p.definition, p.index)),
+    }
     let shown = max_results.clamp(1, MAX_RESULTS);
     out.push_str(&format!(
         "« {query} » : {total} occurrence{} sur {} {}.\n",
@@ -439,10 +528,42 @@ pub fn search(index: &BookIndex, query: &str, max_results: usize) -> String {
             if rest.len() > 40 { ", …" } else { "" },
         ));
     }
+    if !unread.is_empty() {
+        out.push('\n');
+        out.push_str(&unread);
+    }
     out
 }
 
-pub fn get_pages(index: &BookIndex, from: usize, to: usize) -> Result<String, String> {
+/// What lies beyond the furthest page read, without a word of its content,
+/// and the pages the reader may open with one click (`[non-lu: …]`, read by
+/// the app to offer them).
+fn unread_summary(index: &BookIndex, state: &ReadingState, hidden: &[PageHits]) -> String {
+    if hidden.is_empty() {
+        return String::new();
+    }
+    let count: usize = hidden.iter().map(|p| p.hits.len()).sum();
+    let mut pages: Vec<usize> = hidden.iter().map(|p| index.pages[p.index].page).collect();
+    let offered: Vec<String> = pages.iter().take(3).map(|n| n.to_string()).collect();
+    pages.sort();
+    let listed: Vec<String> = pages.iter().take(12).map(|n| n.to_string()).collect();
+    format!(
+        "Plus loin, dans une partie que le lecteur n'a pas encore lue ({}) : {count} occurrence{} ({} {}{}). Leur contenu n'est pas montré. Ne le devine pas et ne le raconte pas, même si tu connais le livre : dis au lecteur que c'est traité plus loin, à quelle page, et propose-lui de regarder ; il peut t'ouvrir une page d'un clic.\n[non-lu: {}]\n",
+        state.unread_note(index),
+        if count > 1 { "s" } else { "" },
+        if index.is_pdf() { "p." } else { "sections" },
+        listed.join(", "),
+        if pages.len() > 12 { ", …" } else { "" },
+        offered.join(", "),
+    )
+}
+
+pub fn get_pages(
+    index: &BookIndex,
+    from: usize,
+    to: usize,
+    state: &ReadingState,
+) -> Result<String, String> {
     let last = index
         .page_count
         .max(index.pages.last().map_or(0, |p| p.page));
@@ -465,12 +586,30 @@ pub fn get_pages(index: &BookIndex, from: usize, to: usize) -> Result<String, St
             index.unit_plural()
         ));
     }
+    if (from..=to.min(last)).all(|n| !state.visible(n)) {
+        return Err(format!(
+            "{} non lue{} : le lecteur n'est pas encore allé {}. N'en devine pas le contenu ; propose-lui de regarder : il peut t'ouvrir une page d'un clic.\n[non-lu: {}]",
+            if from == to.min(last) { format!("p. {from}") } else { format!("p. {from}–{}", to.min(last)) },
+            if from == to.min(last) { "" } else { "s" },
+            state.unread_note(index),
+            from,
+        ));
+    }
     let mut out = index.numbering_note();
     if !out.is_empty() {
         out.push('\n');
     }
     let mut budget = MAX_CHARS_PER_CALL;
+    let mut first_hidden = None;
     for n in from..=to.min(last) {
+        if !state.visible(n) {
+            first_hidden.get_or_insert(n);
+            out.push_str(&format!(
+                "[{n}] non lue : le lecteur n'est pas encore allé {} ; page non montrée.\n\n",
+                state.unread_note(index)
+            ));
+            continue;
+        }
         match index.pages.iter().find(|p| p.page == n) {
             Some(_) if budget == 0 => {
                 out.push_str(&format!(
@@ -501,6 +640,9 @@ pub fn get_pages(index: &BookIndex, from: usize, to: usize) -> Result<String, St
             )),
             None => out.push_str(&format!("[{n}] (aucun texte sur cette page)\n\n")),
         }
+    }
+    if let Some(n) = first_hidden {
+        out.push_str(&format!("[non-lu: {n}]\n"));
     }
     Ok(out.trim_end().to_string())
 }
@@ -534,7 +676,7 @@ fn tool_list() -> Value {
     json!({ "tools": [
         {
             "name": "search_book",
-            "description": "Cherche un mot, une expression ou un symbole dans tout le livre (insensible à la casse et aux espaces ; ∫, ∑, ≠ sont aussi trouvés quand l'extraction du PDF les a abîmés). Renvoie les pages, celles qui semblent définir le terme en premier, avec un extrait autour de chaque occurrence.",
+            "description": "Cherche un mot, une expression ou un symbole dans tout le livre (insensible à la casse et aux espaces ; ∫, ∑, ≠ sont aussi trouvés quand l'extraction du PDF les a abîmés). Renvoie les pages, les plus proches du lecteur et celles qui semblent définir le terme en premier, avec un extrait autour de chaque occurrence. Ce que le lecteur n'a pas encore lu est seulement compté, pas montré.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -546,7 +688,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "get_pages",
-            "description": "Texte extrait des pages from à to du livre (5 au plus par appel), chaque page précédée de son numéro. Le texte d'un PDF perd les indices et la structure des formules.",
+            "description": "Texte extrait des pages from à to du livre (5 au plus par appel), chaque page précédée de son numéro. Le texte d'un PDF perd les indices et la structure des formules. Les pages que le lecteur n'a pas encore lues sont refusées, sauf s'il les a ouvertes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -564,7 +706,8 @@ fn tool_list() -> Value {
     ]})
 }
 
-/// The index file, read again whenever it changes on disk.
+/// The index file, read again whenever it changes on disk, and the reading
+/// state beside it (`<hash>.state.json`), read at every call.
 pub struct IndexSource {
     path: PathBuf,
     loaded: Option<(SystemTime, BookIndex)>,
@@ -573,6 +716,23 @@ pub struct IndexSource {
 impl IndexSource {
     pub fn new(path: PathBuf) -> IndexSource {
         IndexSource { path, loaded: None }
+    }
+
+    pub fn state_path(&self) -> PathBuf {
+        let stem = self
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.path.with_file_name(format!("{stem}.state.json"))
+    }
+
+    /// No state (a book not opened since the feature): nothing is hidden.
+    fn state(&self) -> ReadingState {
+        std::fs::read_to_string(self.state_path())
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
     }
 
     fn get(&mut self) -> Result<&BookIndex, String> {
@@ -602,6 +762,7 @@ fn arg_usize(args: &Value, key: &str) -> Option<usize> {
 }
 
 pub fn call_tool(source: &mut IndexSource, name: &str, args: &Value) -> Result<String, String> {
+    let state = source.state();
     let index = source.get()?;
     match name {
         "search_book" => {
@@ -610,12 +771,12 @@ pub fn call_tool(source: &mut IndexSource, name: &str, args: &Value) -> Result<S
                 .and_then(Value::as_str)
                 .ok_or("search_book attend un paramètre query.")?;
             let max = arg_usize(args, "max_results").unwrap_or(DEFAULT_RESULTS);
-            Ok(search(index, query, max))
+            Ok(search(index, query, max, &state))
         }
         "get_pages" => {
             let from = arg_usize(args, "from").ok_or("get_pages attend from et to.")?;
             let to = arg_usize(args, "to").unwrap_or(from);
-            get_pages(index, from, to)
+            get_pages(index, from, to, &state)
         }
         "get_toc" => Ok(get_toc(index)),
         other => Err(format!("Outil inconnu : {other}")),
@@ -705,6 +866,11 @@ pub fn serve(index_path: Option<String>) -> i32 {
 mod tests {
     use super::*;
 
+    /// No reading state: nothing hidden.
+    fn open() -> ReadingState {
+        ReadingState::default()
+    }
+
     fn book() -> BookIndex {
         BookIndex {
             title: "Test".into(),
@@ -727,7 +893,7 @@ mod tests {
 
     #[test]
     fn finds_a_symbol_and_puts_its_definition_first() {
-        let out = search(&book(), "⊗", 8);
+        let out = search(&book(), "⊗", 8, &open());
         assert!(out.contains("2 occurrences sur 2 pages"), "{out}");
         let first = out.find("[p. 2]").unwrap();
         let second = out.find("[p. 1]").unwrap();
@@ -738,21 +904,21 @@ mod tests {
 
     #[test]
     fn ignores_case_spaces_and_line_breaks() {
-        let out = search(&book(), "TENSOR PRODUCT a ⊗ b of two vectors", 8);
+        let out = search(&book(), "TENSOR PRODUCT a ⊗ b of two vectors", 8, &open());
         assert!(out.contains("[p. 2]"), "{out}");
     }
 
     #[test]
     fn reads_extraction_artefacts_as_symbols() {
-        assert!(search(&book(), "∫", 8).contains("[p. 3]"));
-        assert!(search(&book(), "≠", 8).contains("[p. 3]"));
-        assert!(search(&book(), "[ασ12", 8).contains("[p. 4]"));
+        assert!(search(&book(), "∫", 8, &open()).contains("[p. 3]"));
+        assert!(search(&book(), "≠", 8, &open()).contains("[p. 3]"));
+        assert!(search(&book(), "[ασ12", 8, &open()).contains("[p. 4]"));
         // A real variable Z is still found as a Z.
-        assert!(search(&book(), "variable Z", 8).contains("[p. 4]"));
+        assert!(search(&book(), "variable Z", 8, &open()).contains("[p. 4]"));
         // The set of integers is not an integral.
         let mut ints = book();
         ints.pages[3].text = "for all x ∈ Z | x > 0, and (Z, +) is a group".into();
-        assert!(!search(&ints, "∫", 8).contains("[p. 4]"));
+        assert!(!search(&ints, "∫", 8, &open()).contains("[p. 4]"));
     }
 
     #[test]
@@ -760,7 +926,7 @@ mod tests {
         let mut b = book();
         b.pages[0].text = "Notation: the random variable X takes values".into();
         b.pages[1].text = "the sum ∑ of all terms".into();
-        let out = search(&b, "∑", 8);
+        let out = search(&b, "∑", 8, &open());
         let sure = out.find("[p. 2]").unwrap();
         let guess = out.find("[p. 1]").unwrap();
         assert!(sure < guess, "{out}");
@@ -771,7 +937,7 @@ mod tests {
 
     #[test]
     fn highlights_the_whole_repaired_sign() {
-        let out = search(&book(), "≠", 8);
+        let out = search(&book(), "≠", 8, &open());
         assert!(out.contains("«̸ =»"), "{out}");
     }
 
@@ -792,7 +958,7 @@ mod tests {
         b.page_count = 30;
         b.detect_printed_offset();
         assert_eq!(b.printed_offset, Some(6));
-        let pages = get_pages(&b, 10, 10).unwrap();
+        let pages = get_pages(&b, 10, 10, &open()).unwrap();
         assert!(pages.contains("[p. 10 (imprimée 4)]"), "{pages}");
         assert!(pages.contains("ajoute 6"), "{pages}");
         // A book printing the PDF's own numbers has no note.
@@ -806,15 +972,133 @@ mod tests {
         let mut epub = book();
         epub.unit = "section".into();
         epub.pages[0].text = "a".repeat(MAX_CHARS_PER_CALL + 500);
-        let out = get_pages(&epub, 1, 3).unwrap();
+        let out = get_pages(&epub, 1, 3, &open()).unwrap();
         assert!(out.contains("tronqué : 500 caractères de plus"), "{out}");
         assert!(out.contains("redemande à partir de 2"), "{out}");
     }
 
+    /// A book of 10 pages: ⊗ defined as a group law p. 2, reused p. 8 as the
+    /// outer product; chapters at 1 and 7.
+    fn two_meanings() -> BookIndex {
+        let mut b = book();
+        b.page_count = 10;
+        b.toc = vec![
+            TocEntry {
+                label: "1 Groups".into(),
+                page: Some(1),
+                depth: 0,
+            },
+            TocEntry {
+                label: "2 Tensors".into(),
+                page: Some(7),
+                depth: 0,
+            },
+        ];
+        b.pages = (1..=10)
+            .map(|n| IndexedPage {
+                page: n,
+                label: None,
+                text: match n {
+                    2 => "Definition (Group). An operation ⊗ on G.".into(),
+                    8 => "The outer product δ ⊗ δ of two vectors.".into(),
+                    9 => "Definition (law of total variance). V[x] = E[V[x|y]]".into(),
+                    _ => format!("page {n}"),
+                },
+            })
+            .collect();
+        b
+    }
+
+    fn at(current: usize, max: usize) -> ReadingState {
+        ReadingState {
+            max_page: Some(max),
+            current_page: Some(current),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hides_what_the_reader_has_not_read_and_offers_it() {
+        let out = search(&two_meanings(), "law of total variance", 8, &at(3, 4));
+        assert!(
+            out.contains(
+                "Aucune occurrence de « law of total variance » dans ce que le lecteur a lu"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("au-delà de la p. 4"), "{out}");
+        assert!(out.contains("[non-lu: 9]"), "{out}");
+        // Not a word of the hidden page.
+        assert!(!out.contains("E[V"), "{out}");
+    }
+
+    #[test]
+    fn shows_the_read_part_and_counts_the_rest() {
+        let out = search(&two_meanings(), "⊗", 8, &at(3, 4));
+        assert!(out.contains("[p. 2]"), "{out}");
+        assert!(!out.contains("outer product"), "{out}");
+        assert!(out.contains("[non-lu: 8]"), "{out}");
+    }
+
+    #[test]
+    fn opens_ahead_with_the_switch_or_for_the_offered_pages() {
+        let mut allowed = at(3, 4);
+        allowed.spoilers_allowed = true;
+        assert!(search(&two_meanings(), "law of total variance", 8, &allowed).contains("[p. 9]"));
+        let mut window = at(3, 4);
+        window.allowed_window = Some([9, 10]);
+        assert!(get_pages(&two_meanings(), 9, 10, &window)
+            .unwrap()
+            .contains("total variance"));
+        assert!(get_pages(&two_meanings(), 8, 8, &window).is_err());
+    }
+
+    #[test]
+    fn refuses_unread_pages_and_marks_them_in_a_mixed_range() {
+        let err = get_pages(&two_meanings(), 8, 9, &at(3, 4)).unwrap_err();
+        assert!(err.contains("non lues"), "{err}");
+        assert!(err.contains("[non-lu: 8]"), "{err}");
+        // Two pages ahead are shown, as the app sends them anyway.
+        let mixed = get_pages(&two_meanings(), 6, 7, &at(3, 4)).unwrap();
+        assert!(mixed.contains("[p. 6]\npage 6"), "{mixed}");
+        assert!(mixed.contains("[7] non lue"), "{mixed}");
+        assert!(mixed.contains("[non-lu: 7]"), "{mixed}");
+        // Nothing recorded yet: nothing hidden.
+        assert!(get_pages(&two_meanings(), 9, 9, &at(3, 0)).is_ok());
+    }
+
+    #[test]
+    fn ranks_the_meaning_near_the_reader_first() {
+        let near_outer = search(&two_meanings(), "⊗", 8, &at(8, 9));
+        assert!(
+            near_outer.find("[p. 8]").unwrap() < near_outer.find("[p. 2]").unwrap(),
+            "{near_outer}"
+        );
+        let near_group = search(&two_meanings(), "⊗", 8, &at(2, 9));
+        assert!(
+            near_group.find("[p. 2]").unwrap() < near_group.find("[p. 8]").unwrap(),
+            "{near_group}"
+        );
+    }
+
+    #[test]
+    fn reads_the_state_file_next_to_the_index() {
+        let source = IndexSource::new(PathBuf::from("/data/index/abc.json"));
+        assert_eq!(
+            source.state_path(),
+            PathBuf::from("/data/index/abc.state.json")
+        );
+        let state: ReadingState = serde_json::from_str(
+            r#"{"maxPage":35,"currentPage":20,"spoilersAllowed":false,"allowedWindow":[209,210],"updatedAt":1}"#,
+        )
+        .unwrap();
+        assert!(state.visible(37) && !state.visible(38) && state.visible(210));
+    }
+
     #[test]
     fn says_when_nothing_is_found() {
-        assert!(search(&book(), "eigenvalue", 8).contains("Aucune occurrence"));
-        assert!(search(&book(), "   ", 8).contains("Recherche vide"));
+        assert!(search(&book(), "eigenvalue", 8, &open()).contains("Aucune occurrence"));
+        assert!(search(&book(), "   ", 8, &open()).contains("Recherche vide"));
     }
 
     #[test]
@@ -822,24 +1106,28 @@ mod tests {
         let mut partial = book();
         partial.complete = false;
         partial.page_count = 400;
-        assert!(search(&partial, "⊗", 8).contains("encore en construction"));
+        assert!(search(&partial, "⊗", 8, &open()).contains("encore en construction"));
     }
 
     #[test]
     fn lists_the_pages_beyond_the_detailed_ones() {
-        let out = search(&book(), "the", 1);
+        let out = search(&book(), "the", 1, &open());
         assert!(out.contains("Aussi aux pages"), "{out}");
     }
 
     #[test]
     fn returns_pages_with_their_numbers_and_refuses_bad_ranges() {
-        let out = get_pages(&book(), 2, 3).unwrap();
+        let out = get_pages(&book(), 2, 3, &open()).unwrap();
         assert!(out.starts_with("[p. 2]\nDefinition 1.2"), "{out}");
         assert!(out.contains("[p. 3]"));
-        assert!(get_pages(&book(), 1, 9).unwrap_err().contains("Au plus 5"));
-        assert!(get_pages(&book(), 7, 8).unwrap_err().contains("n'a que 4"));
-        assert!(get_pages(&book(), 3, 2).is_err());
-        assert!(get_pages(&book(), 0, 1).is_err());
+        assert!(get_pages(&book(), 1, 9, &open())
+            .unwrap_err()
+            .contains("Au plus 5"));
+        assert!(get_pages(&book(), 7, 8, &open())
+            .unwrap_err()
+            .contains("n'a que 4"));
+        assert!(get_pages(&book(), 3, 2, &open()).is_err());
+        assert!(get_pages(&book(), 0, 1, &open()).is_err());
     }
 
     #[test]
@@ -856,7 +1144,7 @@ mod tests {
         let mut epub = book();
         epub.unit = "section".into();
         epub.pages[1].label = Some("Tensors".into());
-        assert!(search(&epub, "⊗", 8).contains("[section 2 « Tensors »]"));
+        assert!(search(&epub, "⊗", 8, &open()).contains("[section 2 « Tensors »]"));
     }
 
     #[test]

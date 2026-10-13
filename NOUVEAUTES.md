@@ -21,6 +21,21 @@ il consomme le quota de l'abonnement. Si le binaire `claude` n'est pas dans le `
 
 ---
 
+## Pas de spoiler
+
+*(PR #16)*
+
+- **Claude ne dévoile rien au-delà de ce que tu as lu** : l'app retient la page la plus loin que tu as
+  atteinte en lisant (un saut vers l'index du livre ou une annexe ne compte pas), et les recherches
+  dans le livre s'arrêtent là.
+- **Une notion traitée plus loin est annoncée, pas racontée** : « c'est traité p. 209, veux-tu que je
+  regarde ? », avec un bouton « Regarder p. 209 » qui lui ouvre ces deux pages pour cette question
+  seulement.
+- **Relecture** : l'œil en haut du chat autorise tout le livre, pour ce livre, jusqu'à ce qu'on le
+  recoupe.
+- **Les résultats suivent ta lecture** : un symbole à plusieurs sens renvoie d'abord le sens de la
+  page où tu es.
+
 ## Claude consulte tout le livre
 
 *(PR #15)*
@@ -240,11 +255,9 @@ il consomme le quota de l'abonnement. Si le binaire `claude` n'est pas dans le `
 
 ## Ce qui n'est pas encore fait
 
-- Sur un PDF, seule la couche texte est envoyée au modèle ; l'image du passage sélectionné suivra,
-  ce qui compte pour les formules, les matrices et les symboles mal extraits.
-- On ne peut pas encore mettre deux passages en relation dans la même question.
-- Le modèle ne peut pas encore chercher ailleurs dans le livre, ni se souvenir d'un terme déjà
-  expliqué d'une conversation à l'autre.
+- Un glossaire des termes expliqués, retenu d'une conversation à l'autre.
+- Des tutoriels d'utilisation ; en attendant, `FONCTIONNEMENT.md` décrit le comportement de chaque
+  fonction, situation par situation.
 
 ## Licence
 
