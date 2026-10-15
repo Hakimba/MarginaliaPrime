@@ -3,6 +3,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -30,7 +31,7 @@ import {
   type PendingSelection,
   type ReadingState,
 } from '@/store/chatStore';
-import { perfMark } from '@/utils/perf';
+import { perfMark, perfRender } from '@/utils/perf';
 import { useSidebarStore } from '@/store/sidebarStore';
 import { useReaderStore } from '@/store/readerStore';
 import { useBookDataStore } from '@/store/bookDataStore';
@@ -62,11 +63,10 @@ import {
   type ChatMessage,
   type ConversationMeta,
 } from '@/services/chat/persistence';
-import { renderChatMarkdown } from '@/services/chat/markdown';
-import { splitTranscriptions } from '@/services/chat/transcriptions';
 import { circled } from '../../utils/formulaOverlay';
 import { attachPassage } from '../../utils/selectionToChat';
 import { getTextFromRange } from '@/utils/sel';
+import ChatHistory, { Answer, itemsOf } from './ChatHistory';
 import ModelSelector from './ModelSelector';
 import InspectOverlay, { type InspectData } from './InspectOverlay';
 
@@ -76,114 +76,6 @@ const SMOKE_RESUME_KEY = 'marginalia-smoke-resume';
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
 }
-
-/**
- * One answer, rendered once. Without the memo every streamed chunk rendered
- * the whole transcript again, formulas included.
- */
-const ChatMarkdown = React.memo(function ChatMarkdown({
-  content,
-  pageLinks = false,
-}: {
-  content: string;
-  pageLinks?: boolean;
-}) {
-  const html = useMemo(() => renderChatMarkdown(content, { pageLinks }), [content, pageLinks]);
-  return (
-    <div
-      className='chat-markdown prose prose-sm max-w-none'
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
-  );
-});
-
-type SentItem = NonNullable<NonNullable<ChatMessage['selection']>['items']>[number];
-
-/** The passages of a sent message, older messages included (images only). */
-const itemsOf = (message: ChatMessage | undefined): SentItem[] => {
-  const selection = message?.role === 'user' ? message.selection : undefined;
-  if (!selection) return [];
-  if (selection.items) return selection.items;
-  if (selection.images?.length) return selection.images.map((image) => ({ text: '', image }));
-  return [{ text: selection.text, location: selection.chapter }];
-};
-
-/** An image rendered at 3 px per point, shown about the size it has on the page. */
-const PageImage: React.FC<{
-  image: string;
-  alt: string;
-  className?: string;
-}> = ({ image, alt, className }) => (
-  <img
-    src={`data:image/png;base64,${image}`}
-    alt={alt}
-    onLoad={(e) => {
-      const img = e.currentTarget;
-      img.style.width = `${Math.round(img.naturalWidth * 0.45)}px`;
-    }}
-    className={clsx('max-w-full rounded bg-white p-1', className)}
-  />
-);
-
-/**
- * An answer, with the image of each passage put back above its transcription:
- * the reader checks the transcription against the page without scrolling up.
- * An answer without a transcription, or a turn without images, is left as is.
- */
-const Answer: React.FC<{
-  content: string;
-  items: SentItem[];
-  pageLinks?: boolean;
-}> = ({ content, items, pageLinks = false }) => {
-  if (!items.some((item) => item.image)) {
-    return <ChatMarkdown content={content} pageLinks={pageLinks} />;
-  }
-  return (
-    <>
-      {splitTranscriptions(content).map((piece, j) => {
-        const image = piece.passage !== undefined ? items[piece.passage]?.image : undefined;
-        return (
-          <div key={j}>
-            {image && (
-              <PageImage
-                image={image}
-                alt={`Original ${(piece.passage ?? 0) + 1}`}
-                className='border-base-300 mb-1 border'
-              />
-            )}
-            <ChatMarkdown content={piece.content} pageLinks={pageLinks} />
-          </div>
-        );
-      })}
-    </>
-  );
-};
-
-/** The passages a question was sent with, numbered when there were several. */
-const SentPassages: React.FC<{ items: SentItem[] }> = ({ items }) => {
-  if (!items.length) return null;
-  return (
-    <div className='mb-2 flex flex-col gap-1.5'>
-      {items.map((item, k) => (
-        <div key={k} className='flex items-start gap-1.5'>
-          {items.length > 1 && (
-            <span className='text-xs leading-5 opacity-80'>{circled(k + 1)}</span>
-          )}
-          {item.image ? (
-            <PageImage image={item.image} alt={`Passage ${k + 1}`} />
-          ) : (
-            <div className='line-clamp-3 border-l-2 border-white/40 pl-2 text-xs italic opacity-80'>
-              &ldquo;{item.text}&rdquo;
-              {item.location && (
-                <div className='mt-0.5 text-[10px] not-italic opacity-60'>{item.location}</div>
-              )}
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-};
 
 /**
  * Where the reader is, and what of the book the next question takes along:
@@ -378,6 +270,7 @@ const toEngineSelection = ({
 });
 
 const ChatPanel: React.FC = () => {
+  perfRender('ChatPanel');
   const {
     isOpen,
     isPinned,
@@ -461,7 +354,7 @@ const ChatPanel: React.FC = () => {
     document.addEventListener('pointerup', onUp);
   };
 
-  const { sideBarBookKey } = useSidebarStore();
+  const sideBarBookKey = useSidebarStore((state) => state.sideBarBookKey);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
   const [input, setInput] = useState('');
@@ -523,7 +416,10 @@ const ChatPanel: React.FC = () => {
     const save = pendingSave.current;
     if (save) save();
   };
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const followLatestRef = useRef(true);
+  const lastTranscriptTopRef = useRef(0);
+  const wasOpenRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const currentBookHash = useRef<string>('');
 
@@ -576,11 +472,13 @@ const ChatPanel: React.FC = () => {
       setConversations(convos);
       const latest = [...convos].sort((a, b) => b.lastMessageAt - a.lastMessageAt)[0];
       if (!latest) {
+        followLatestRef.current = true;
         setConversationId(generateId());
         setMessages([]);
         return;
       }
       return loadMessages(hash, latest.id).then((loaded) => {
+        followLatestRef.current = true;
         if (loaded.length > 0) {
           setConversationId(latest.id);
           setMessages(loaded);
@@ -607,9 +505,26 @@ const ChatPanel: React.FC = () => {
   // Leaving the reader within half a second of an answer must not lose it.
   useEffect(() => () => flushPendingSave(), []);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, streamingContent]);
+  const handleTranscriptScroll = () => {
+    const node = transcriptRef.current;
+    if (node) {
+      const top = node.scrollTop;
+      const gap = node.scrollHeight - node.clientHeight - top;
+      if (top < lastTranscriptTopRef.current && gap > 0) followLatestRef.current = false;
+      else if (top > lastTranscriptTopRef.current) followLatestRef.current = gap <= 32;
+      lastTranscriptTopRef.current = top;
+    }
+  };
+
+  useLayoutEffect(() => {
+    if (isOpen && !wasOpenRef.current) followLatestRef.current = true;
+    wasOpenRef.current = isOpen;
+    const node = transcriptRef.current;
+    if (node && followLatestRef.current) {
+      node.scrollTop = node.scrollHeight;
+      lastTranscriptTopRef.current = node.scrollTop;
+    }
+  }, [isOpen, messages, streamingContent, isStreaming, activeTool, error]);
 
   // Docked, the panel takes its width from the reader instead of covering it;
   // the mark records what the page is actually left with.
@@ -958,6 +873,7 @@ const ChatPanel: React.FC = () => {
     // last two seconds, and Enter pressed meanwhile sent the turn twice, with
     // two processes answering into the same bubble.
     if (isStreaming || sending.current) return;
+    followLatestRef.current = true;
     sending.current = true;
     try {
       await sendTurn(text, fromPage);
@@ -1044,6 +960,7 @@ const ChatPanel: React.FC = () => {
 
   const resetConversation = async (id: string) => {
     await stopEngine();
+    followLatestRef.current = true;
     setConversationId(id);
     setMessages([]);
     setStreamingContent('');
@@ -1087,7 +1004,9 @@ const ChatPanel: React.FC = () => {
     flushPendingSave();
     await stopEngine();
     setConversationId(id);
-    setMessages(await loadMessages(bookHash, id));
+    const loaded = await loadMessages(bookHash, id);
+    followLatestRef.current = true;
+    setMessages(loaded);
     setStreamingContent('');
     setSessionId(conversations.find((c) => c.id === id)?.engineSessionId ?? null);
     setError(null);
@@ -1360,12 +1279,12 @@ const ChatPanel: React.FC = () => {
   };
 
   /** The reader opens a page ahead of what they read, for one question. */
-  const openUnread = (page: number) => {
+  const openUnread = useCallback((page: number) => {
     const current = readingOf(useChatStore.getState(), bookHash);
     if (!current || isStreaming || sending.current) return;
     useChatStore.getState().updateReading(current.hash, { allowedWindow: [page, page + 1] });
     void handleSendRef.current?.(`Oui, tu peux regarder la ${unitLabel(current, page)}.`);
-  };
+  }, [bookHash, isStreaming]);
 
   const toggleSpoilers = () => {
     const current = readingOf(useChatStore.getState(), bookHash);
@@ -1497,6 +1416,8 @@ const ChatPanel: React.FC = () => {
           real anchors, focusable and activated by the keyboard themselves. */}
       {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions */}
       <div
+        ref={transcriptRef}
+        onScroll={handleTranscriptScroll}
         className='flex-1 space-y-3 overflow-y-auto px-3 py-2 select-text'
         onClick={handlePageLink}
       >
@@ -1505,59 +1426,13 @@ const ChatPanel: React.FC = () => {
             Sélectionne un passage, ou pose une question
           </div>
         )}
-        {messages.map((msg, i) => (
-          <div key={i} className={clsx('chat', msg.role === 'user' ? 'chat-end' : 'chat-start')}>
-            <div
-              className={clsx(
-                'chat-bubble text-sm',
-                msg.role === 'user'
-                  ? 'chat-bubble-primary'
-                  : 'chat-bubble bg-base-200 text-base-content',
-              )}
-            >
-              {msg.role === 'user' ? (
-                <div>
-                  <SentPassages items={itemsOf(msg)} />
-                  <span className='whitespace-pre-wrap'>{msg.content}</span>
-                </div>
-              ) : (
-                <>
-                  {msg.tools?.length ? (
-                    <div className='text-base-content/50 mb-1 flex flex-col text-[11px]'>
-                      {msg.tools.map((tool, k) => (
-                        <span key={k} className='flex items-center gap-1'>
-                          <FiSearch size={10} className='shrink-0' />
-                          {tool}
-                        </span>
-                      ))}
-                    </div>
-                  ) : null}
-                  <Answer
-                    content={msg.content}
-                    items={itemsOf(messages[i - 1])}
-                    pageLinks={pageLinks}
-                  />
-                  {/* Pages ahead the tools found: the reader decides. Only on
-                      the last answer, the one the next question follows. */}
-                  {msg.unread?.length && i === messages.length - 1 && !isStreaming ? (
-                    <div className='mt-2 flex flex-wrap gap-1'>
-                      {msg.unread.map((page) => (
-                        <button
-                          key={page}
-                          className='btn btn-xs btn-outline'
-                          onClick={() => openUnread(page)}
-                          title={`Laisser Claude lire ${unitLabel(reading, page)} et la suivante, pour cette question seulement`}
-                        >
-                          Regarder {unitLabel(reading, page)}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                </>
-              )}
-            </div>
-          </div>
-        ))}
+        <ChatHistory
+          messages={messages}
+          isStreaming={isStreaming}
+          pageLinks={pageLinks}
+          fixedLayout={reading?.fixedLayout ?? true}
+          onOpenUnread={openUnread}
+        />
         {streamingContent && (
           <div className='chat chat-start'>
             <div className='chat-bubble bg-base-200 text-base-content text-sm'>
@@ -1583,7 +1458,6 @@ const ChatPanel: React.FC = () => {
           </div>
         )}
         {error && <div className='alert alert-error text-xs'>{error}</div>}
-        <div ref={messagesEndRef} />
       </div>
 
       {pendingSelections.length > 0 && (
@@ -1779,4 +1653,4 @@ const summarize = (event: EngineEvent): string => {
   }
 };
 
-export default ChatPanel;
+export default React.memo(ChatPanel);

@@ -21,7 +21,7 @@ import {
 } from '@/utils/book';
 import { partialMD5, md5 } from '@/utils/md5';
 import { getBaseFilename, getFilename } from '@/utils/path';
-import { BookDoc, DocumentLoader, EXTS } from '@/libs/document';
+import { BookDoc, DocumentLoader, EXTS, disposeBookDocument } from '@/libs/document';
 import { DEFAULT_BOOK_SEARCH_CONFIG, DEFAULT_FIXED_LAYOUT_VIEW_SETTINGS } from './constants';
 import { isContentURI, isValidURL, makeSafeFilename } from '@/utils/misc';
 import { deserializeConfig, serializeConfig } from '@/utils/serializer';
@@ -199,8 +199,10 @@ export async function importBook(
   saveBookConfigFn: (book: Book, config: BookConfig) => Promise<void>,
   generateCoverImageUrlFn: (book: Book) => Promise<string>,
 ): Promise<Book | null> {
+  let loadedBook: BookDoc | undefined;
+  const files = new Set<File>();
+  const operationErrors: unknown[] = [];
   try {
-    let loadedBook: BookDoc;
     let format: BookFormat;
     let filename: string;
     let fileobj: File;
@@ -217,9 +219,11 @@ export async function importBook(
         fileobj = file;
         filename = file.name;
       }
+      files.add(fileobj);
       if (/\.txt$/i.test(filename)) {
         const txt2epub = new TxtToEpubConverter();
         ({ file: fileobj } = await txt2epub.convert({ file: fileobj }));
+        files.add(fileobj);
       }
       if (!fileobj || fileobj.size === 0) {
         throw new Error('Invalid or empty book file');
@@ -233,7 +237,10 @@ export async function importBook(
         loadedBook.metadata.title = getBaseFilename(filename);
       }
     } catch (error) {
-      throw new Error(`Failed to open the book file: ${(error as Error).message || error}`);
+      throw new Error(
+        `Failed to open the book file: ${error instanceof Error ? error.message : error}`,
+        { cause: error },
+      );
     }
 
     const hash = await partialMD5(fileobj);
@@ -401,15 +408,13 @@ export async function importBook(
       }
     }
     book.coverImageUrl = await generateCoverImageUrlFn(book);
-    const f = file as ClosableFile;
-    if (f && f.close) {
-      await f.close();
-    }
-
     return existingBook || book;
   } catch (error) {
+    operationErrors.push(error);
     console.error('Error importing book:', error);
     throw error;
+  } finally {
+    await disposeBookDocument({ bookDoc: loadedBook, files, operationErrors });
   }
 }
 
@@ -528,12 +533,17 @@ export async function deleteBook(fs: FileSystem, book: Book): Promise<void> {
 
 export async function fetchBookDetails(fs: FileSystem, book: Book): Promise<BookDoc['metadata']> {
   const { file } = await loadBookContent(fs, book);
-  const bookDoc = (await new DocumentLoader(file).open()).book;
-  const f = file as ClosableFile;
-  if (f && f.close) {
-    await f.close();
+  let bookDoc: BookDoc | undefined;
+  const operationErrors: unknown[] = [];
+  try {
+    ({ book: bookDoc } = await new DocumentLoader(file).open());
+    return bookDoc.metadata;
+  } catch (error) {
+    operationErrors.push(error);
+    throw error;
+  } finally {
+    await disposeBookDocument({ bookDoc, files: [file], operationErrors });
   }
-  return bookDoc.metadata;
 }
 
 /**
@@ -544,27 +554,35 @@ export async function fetchBookDetails(fs: FileSystem, book: Book): Promise<Book
  */
 export async function refreshBookMetadata(fs: FileSystem, book: Book): Promise<boolean> {
   const { file } = await loadBookContent(fs, book);
-  const { book: bookDoc } = await new DocumentLoader(file).open();
-  if (!bookDoc) return false;
+  let bookDoc: BookDoc | undefined;
+  const operationErrors: unknown[] = [];
+  try {
+    ({ book: bookDoc } = await new DocumentLoader(file).open());
+    if (!bookDoc) return false;
 
-  book.metadata = bookDoc.metadata;
-  book.metaHash = getMetadataHash(bookDoc.metadata);
-  const primaryLanguage = getPrimaryLanguage(bookDoc.metadata.language);
-  if (primaryLanguage) {
-    book.primaryLanguage = primaryLanguage;
-  }
-
-  // Update series info from metadata
-  if (book.metadata?.belongsTo?.series) {
-    const belongsTo = book.metadata.belongsTo.series;
-    const series = Array.isArray(belongsTo) ? belongsTo[0] : belongsTo;
-    if (series) {
-      book.metadata.series = formatTitle(series.name);
-      book.metadata.seriesIndex = parseFloat(series.position || '0');
+    book.metadata = bookDoc.metadata;
+    book.metaHash = getMetadataHash(bookDoc.metadata);
+    const primaryLanguage = getPrimaryLanguage(bookDoc.metadata.language);
+    if (primaryLanguage) {
+      book.primaryLanguage = primaryLanguage;
     }
-  }
 
-  return true;
+    if (book.metadata?.belongsTo?.series) {
+      const belongsTo = book.metadata.belongsTo.series;
+      const series = Array.isArray(belongsTo) ? belongsTo[0] : belongsTo;
+      if (series) {
+        book.metadata.series = formatTitle(series.name);
+        book.metadata.seriesIndex = parseFloat(series.position || '0');
+      }
+    }
+
+    return true;
+  } catch (error) {
+    operationErrors.push(error);
+    throw error;
+  } finally {
+    await disposeBookDocument({ bookDoc, files: [file], operationErrors });
+  }
 }
 
 export async function exportBook(

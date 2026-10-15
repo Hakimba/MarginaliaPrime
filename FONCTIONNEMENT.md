@@ -30,6 +30,8 @@ ce qui est, pas ce qui a changé.
 - **Un PDF s'ouvre sur une seule page.** Menu Vue → « Deux pages (auto) » pour deux pages côte à côte
   (repasse à une page si la fenêtre est trop étroite). Le choix est retenu pour chaque livre, et
   changer de mode garde la page lue.
+- **Maj+J** passe au défilement continu. La roulette parcourt les pages. Appuie de nouveau sur
+  **Maj+J** pour revenir au mode paginé en gardant la page lue.
 - **Clic simple sur la page** : la page tourne (moitié gauche : en arrière, droite : en avant).
 - **Glisser** : sélectionne exactement ce que tu glisses, sans déborder sur les notes de marge ni sur
   les chiffres des graphiques. **Double-clic** : un mot. **Triple-clic** : une ligne.
@@ -138,6 +140,9 @@ ce qui est, pas ce qui a changé.
   passages).
 - **Pour expliquer une formule**, il l'annote : chaque terme en couleur, légendé sous une accolade.
 - **Le texte d'une réponse** se sélectionne et se copie normalement.
+- **Pendant une réponse**, le chat suit le texte qui arrive. Remonte pour relire un ancien
+  message : la vue reste à ta position. Reviens en bas ou envoie une nouvelle question pour
+  reprendre le suivi.
 
 ## 8. Limites connues
 

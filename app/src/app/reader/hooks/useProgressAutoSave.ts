@@ -7,9 +7,8 @@ import { debounce } from '@/utils/debounce';
 
 export const useProgressAutoSave = (bookKey: string) => {
   const { envConfig } = useEnv();
-  const { getConfig, saveConfig } = useBookDataStore();
-  const { getProgress } = useReaderStore();
-  const progress = getProgress(bookKey);
+  const { getConfig, saveConfig } = useBookDataStore.getState();
+  const progress = useReaderStore((state) => state.viewStates[bookKey]?.progress);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const saveBookConfig = useCallback(

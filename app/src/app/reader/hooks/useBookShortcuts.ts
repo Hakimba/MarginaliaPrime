@@ -20,14 +20,18 @@ interface UseBookShortcutsProps {
 }
 
 const useBookShortcuts = ({ sideBarBookKey, bookKeys }: UseBookShortcutsProps) => {
-  const { getView, getViewSettings, setViewSettings } = useReaderStore();
+  const getView = useReaderStore((state) => state.getView);
+  const getViewSettings = useReaderStore((state) => state.getViewSettings);
+  const setViewSettings = useReaderStore((state) => state.setViewSettings);
   const { toggleSideBar, setSideBarBookKey } = useSidebarStore();
   const { setSettingsDialogOpen } = useSettingsStore();
-  const { getBookData } = useBookDataStore();
+  const getBookData = useBookDataStore((state) => state.getBookData);
   const { toggleNotebook } = useNotebookStore();
   const { getNextBookKey } = useBooksManager();
   const { open: openCommandPalette } = useCommandPalette();
-  const viewSettings = getViewSettings(sideBarBookKey ?? '');
+  const viewSettings = useReaderStore((state) =>
+    state.viewStates[sideBarBookKey ?? '']?.viewSettings,
+  );
   const fontSize = viewSettings?.defaultFontSize ?? 16;
   const lineHeight = viewSettings?.lineHeight ?? 1.6;
   const distance = fontSize * lineHeight * 3;
@@ -35,10 +39,11 @@ const useBookShortcuts = ({ sideBarBookKey, bookKeys }: UseBookShortcutsProps) =
   const toggleScrollMode = () => {
     const viewSettings = getViewSettings(sideBarBookKey ?? '');
     if (viewSettings && sideBarBookKey) {
-      viewSettings.scrolled = !viewSettings.scrolled;
-      setViewSettings(sideBarBookKey, viewSettings!);
-      const flowMode = viewSettings.scrolled ? 'scrolled' : 'paginated';
+      const updatedSettings = { ...viewSettings, scrolled: !viewSettings.scrolled };
+      setViewSettings(sideBarBookKey, updatedSettings);
+      const flowMode = updatedSettings.scrolled ? 'scrolled' : 'paginated';
       getView(sideBarBookKey)?.renderer.setAttribute('flow', flowMode);
+      return true;
     }
   };
 
@@ -155,9 +160,8 @@ const useBookShortcuts = ({ sideBarBookKey, bookKeys }: UseBookShortcutsProps) =
     if (!sideBarBookKey) return;
     const view = getView(sideBarBookKey);
     const bookData = getBookData(sideBarBookKey);
-    const viewSettings = getViewSettings(sideBarBookKey)!;
-    viewSettings!.zoomLevel = zoomLevel;
-    setViewSettings(sideBarBookKey, viewSettings!);
+    const viewSettings = { ...getViewSettings(sideBarBookKey)!, zoomLevel };
+    setViewSettings(sideBarBookKey, viewSettings);
     if (bookData?.isFixedLayout) {
       view?.renderer.setAttribute('scale-factor', zoomLevel);
     } else {

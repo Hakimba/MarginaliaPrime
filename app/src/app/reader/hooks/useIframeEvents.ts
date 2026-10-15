@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useEffectEvent, useLayoutEffect, useRef } from 'react';
 import { useReaderStore } from '@/store/readerStore';
 import { useBookDataStore } from '@/store/bookDataStore';
 import { debounce } from '@/utils/debounce';
@@ -11,14 +11,42 @@ export const useMouseEvent = (
   handlePageFlip: (msg: MessageEvent | React.MouseEvent<HTMLDivElement, MouseEvent>) => void,
   handleContinuousScroll: (source: ScrollSource, delta: number, threshold: number) => void,
 ) => {
-  const { hoveredBookKey } = useReaderStore();
-  const debounceScroll = debounce(handleContinuousScroll, 500);
-  const debounceFlip = debounce(handlePageFlip, 100);
+  const handlers = useRef({ handleContinuousScroll, handlePageFlip });
+  useLayoutEffect(() => {
+    handlers.current = { handleContinuousScroll, handlePageFlip };
+  }, [handleContinuousScroll, handlePageFlip]);
+  const timers = useRef<{
+    bookKey: string;
+    scroll: ReturnType<typeof debounce<typeof handleContinuousScroll>>;
+    flip: ReturnType<typeof debounce<typeof handlePageFlip>>;
+  } | null>(null);
+  useLayoutEffect(() => {
+    const debouncers = {
+      bookKey,
+      scroll: debounce(
+        (...args: Parameters<typeof handleContinuousScroll>) =>
+          handlers.current.handleContinuousScroll(...args),
+        500,
+      ),
+      flip: debounce(
+        (...args: Parameters<typeof handlePageFlip>) => handlers.current.handlePageFlip(...args),
+        100,
+      ),
+    };
+    timers.current = debouncers;
+    return () => {
+      debouncers.scroll.cancel();
+      debouncers.flip.cancel();
+      timers.current = null;
+    };
+  }, [bookKey]);
   const handleMouseEvent = (msg: MessageEvent | React.MouseEvent<HTMLDivElement, MouseEvent>) => {
+    const debouncers = timers.current;
+    if (!debouncers) return;
     if (msg instanceof MessageEvent) {
-      if (msg.data && msg.data.bookKey === bookKey) {
+      if (msg.data && msg.data.bookKey === debouncers.bookKey) {
         if (msg.data.type === 'iframe-wheel') {
-          debounceScroll('mouse', -msg.data.deltaY, 0);
+          debouncers.scroll('mouse', -msg.data.deltaY, 0);
         }
         if (msg.data.type === 'iframe-wheel') {
           if (msg.data.ctrlKey) {
@@ -28,7 +56,7 @@ export const useMouseEvent = (
               eventDispatcher.dispatch('zoom-in', { factor: Math.abs(msg.data.deltaY) / 100 });
             }
           } else {
-            debounceFlip(msg);
+            debouncers.flip(msg);
           }
         } else {
           handlePageFlip(msg);
@@ -36,19 +64,20 @@ export const useMouseEvent = (
       }
     } else if (msg.type === 'wheel') {
       const event = msg as React.WheelEvent<HTMLDivElement>;
-      debounceScroll('mouse', -event.deltaY, 0);
+      debouncers.scroll('mouse', -event.deltaY, 0);
     } else {
       handlePageFlip(msg);
     }
   };
 
+  const onMouseMessage = useEffectEvent(handleMouseEvent);
   useEffect(() => {
-    window.addEventListener('message', handleMouseEvent);
+    const handleMessage = (message: MessageEvent) => onMouseMessage(message);
+    window.addEventListener('message', handleMessage);
     return () => {
-      window.removeEventListener('message', handleMouseEvent);
+      window.removeEventListener('message', handleMessage);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bookKey, hoveredBookKey]);
+  }, [bookKey]);
 
   return {
     onClick: handlePageFlip,
@@ -97,8 +126,8 @@ export const useTouchEvent = (
   handlePageFlip: (msg: CustomEvent) => void,
   handleContinuousScroll: (source: ScrollSource, delta: number, threshold: number) => void,
 ) => {
-  const { getBookData } = useBookDataStore();
-  const { hoveredBookKey, setHoveredBookKey, getViewSettings, getView } = useReaderStore();
+  const { getBookData } = useBookDataStore.getState();
+  const { setHoveredBookKey, getViewSettings, getView } = useReaderStore.getState();
 
   const touchStartRef = useRef<IframeTouch | null>(null);
   const touchEndRef = useRef<IframeTouch | null>(null);
@@ -139,6 +168,7 @@ export const useTouchEvent = (
   };
 
   const onTouchMove = (e: IframeTouchEvent | React.TouchEvent<HTMLDivElement>) => {
+    const hoveredBookKey = useReaderStore.getState().hoveredBookKey;
     const t0 = e.targetTouches[0] as IframeTouch | undefined;
     const t1 = e.targetTouches[1] as IframeTouch | undefined;
     if (isPinchingRef.current && t0 && t1) {
@@ -174,6 +204,7 @@ export const useTouchEvent = (
   };
 
   const onTouchEnd = (e: IframeTouchEvent | React.TouchEvent<HTMLDivElement>) => {
+    const hoveredBookKey = useReaderStore.getState().hoveredBookKey;
     if (isPinchingRef.current) {
       const t0 = e.targetTouches[0] as IframeTouch | undefined;
       const t1 = e.targetTouches[1] as IframeTouch | undefined;
@@ -260,13 +291,14 @@ export const useTouchEvent = (
     }
   };
 
+  const onTouchMessage = useEffectEvent(handleTouch);
   useEffect(() => {
-    window.addEventListener('message', handleTouch);
+    const handleMessage = (message: MessageEvent) => onTouchMessage(message);
+    window.addEventListener('message', handleMessage);
     return () => {
-      window.removeEventListener('message', handleTouch);
+      window.removeEventListener('message', handleMessage);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hoveredBookKey]);
+  }, [bookKey]);
 
   return {
     onTouchStart,

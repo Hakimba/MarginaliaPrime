@@ -19,18 +19,21 @@
 #
 # Prints the engine events and the scenario trace. Uses the real subscription.
 set -u
+. "$(dirname "$0")/test-process.sh"
 HASH="${1:?book hash}"; SCRIPT="${2:?steps}"; WAIT="${3:-120}"
-BIN="$(cd "$(dirname "$0")/.." && pwd)/app/src-tauri/target/release/Marginalia"
-OUT=$(mktemp /tmp/smoke-chat.XXXXXX.log)
-pkill -x Marginalia 2>/dev/null; sleep 1
-MARGINALIA_PERF_OPEN="$HASH" MARGINALIA_SMOKE_ASK="$SCRIPT" "$BIN" > "$OUT" 2>&1 &
-PID=$!
+BIN="${MARGINALIA_TEST_BINARY:-$(cd "$(dirname "$0")/.." && pwd)/app/src-tauri/target/release/Marginalia}"
+OUT="${MARGINALIA_TEST_LOG:-$(mktemp /tmp/smoke-chat.XXXXXX.log)}"
+MARGINALIA_PERF_OPEN="$HASH" MARGINALIA_SMOKE_ASK="$SCRIPT" start_test_process "$BIN"
 for _ in $(seq "$WAIT"); do
   grep -aq "smoke: scenario done" "$OUT" && break
   sleep 1
 done
 sleep 2
-kill "$PID" 2>/dev/null; sleep 1; pkill -x Marginalia 2>/dev/null
+stop_test_process
+if ! grep -aq 'smoke: scenario done' "$OUT"; then
+  echo "Scénario inachevé. Journal: $OUT" >&2
+  exit 1
+fi
 echo "=== trace ==="
 grep -aE "smoke: |engine event: " "$OUT" |
   sed -E 's/^.*\[js\] console\.(info|warn|error): //' | cut -c1-220

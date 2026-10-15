@@ -1,3 +1,4 @@
+import { perfRender } from '@/utils/perf';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 
 import * as CFI from 'foliate-js/epubcfi.js';
@@ -42,6 +43,7 @@ import { attachPassage } from '../../utils/selectionToChat';
 import ExportMarkdownDialog from './ExportMarkdownDialog';
 
 const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
+  perfRender('Annotator');
   const _ = useTranslation();
   const { envConfig, appService } = useEnv();
   const { settings } = useSettingsStore();
@@ -243,11 +245,6 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
 
     // Attach generic selection listeners for all formats, including PDF.
     // For PDF we only guarantee Copy; highlight/annotate may be limited by CFI support.
-    view?.renderer?.addEventListener('scroll', handleScroll);
-    // Reposition popups on scroll to keep them in view
-    view?.renderer?.addEventListener('scroll', () => {
-      repositionPopups();
-    });
     const opts = { passive: false };
     detail.doc?.addEventListener('touchstart', handleTouchStart, opts);
     detail.doc?.addEventListener('touchmove', handleTouchmove, opts);
@@ -372,11 +369,10 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showingPopup]);
 
-  // When popups are visible, update their positions on scroll events
   useEffect(() => {
-    const view = getView(bookKey);
     if (!view?.renderer) return;
     const onScroll = () => {
+      handleScroll();
       if (showingPopup) {
         repositionPopups();
       }
@@ -385,8 +381,7 @@ const Annotator: React.FC<{ bookKey: string }> = ({ bookKey }) => {
     return () => {
       view.renderer.removeEventListener('scroll', onScroll);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bookKey, showingPopup, repositionPopups]);
+  }, [view, handleScroll, showingPopup, repositionPopups]);
 
   useEffect(() => {
     eventDispatcher.on('export-annotations', handleExportMarkdown);

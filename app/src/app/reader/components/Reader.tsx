@@ -1,5 +1,6 @@
 'use client';
 
+import { perfRender } from '@/utils/perf';
 import clsx from 'clsx';
 import * as React from 'react';
 import { useEffect, Suspense } from 'react';
@@ -42,12 +43,13 @@ Z-Index Layering Guide:
 */
 
 const Reader: React.FC<{ ids?: string }> = ({ ids }) => {
+  perfRender('Reader');
   const router = useRouter();
   const { appService } = useEnv();
   const { settings } = useSettingsStore();
   const { libraryLoaded } = useLibrary();
   const { sideBarBookKey } = useSidebarStore();
-  const { hoveredBookKey } = useReaderStore();
+  const hoveredBookKey = useReaderStore((state) => state.hoveredBookKey);
   const { showSystemUI, dismissSystemUI } = useThemeStore();
   const { getScreenBrightness, setScreenBrightness } = useDeviceControlStore();
   const { acquireBackKeyInterception, releaseBackKeyInterception } = useDeviceControlStore();

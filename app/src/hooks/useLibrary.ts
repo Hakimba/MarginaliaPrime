@@ -5,7 +5,7 @@ import { useSettingsStore } from '@/store/settingsStore';
 
 export const useLibrary = () => {
   const { envConfig } = useEnv();
-  const { setLibrary } = useLibraryStore();
+  const setLibrary = useLibraryStore((state) => state.setLibrary);
   const { setSettings } = useSettingsStore();
   const [libraryLoaded, setLibraryLoaded] = useState(false);
   const isInitiating = useRef(false);
