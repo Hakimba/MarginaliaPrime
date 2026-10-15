@@ -8,6 +8,7 @@ import { useDeviceControlStore } from '@/store/deviceStore';
 import { eventDispatcher } from '@/utils/event';
 import { isTauriAppPlatform } from '@/services/environment';
 import { tauriGetWindowLogicalPosition } from '@/utils/window';
+import { perfMark } from '@/utils/perf';
 
 export type ScrollSource = 'touch' | 'mouse';
 
@@ -104,14 +105,15 @@ export const usePagination = (
   containerRef: React.RefObject<HTMLDivElement | null>,
 ) => {
   const { appService } = useEnv();
-  const { getBookData } = useBookDataStore();
-  const { getViewSettings, getViewState } = useReaderStore();
-  const { hoveredBookKey, setHoveredBookKey } = useReaderStore();
+  const { getBookData } = useBookDataStore.getState();
+  const { getViewSettings, getViewState } = useReaderStore.getState();
+  const { setHoveredBookKey } = useReaderStore.getState();
   const { acquireVolumeKeyInterception, releaseVolumeKeyInterception } = useDeviceControlStore();
 
   const handlePageFlip = async (
     msg: MessageEvent | CustomEvent | React.MouseEvent<HTMLDivElement, MouseEvent>,
   ) => {
+    const hoveredBookKey = useReaderStore.getState().hoveredBookKey;
     const viewState = getViewState(bookKey);
     const bookData = getBookData(bookKey);
     if (!viewState?.inited || !bookData) return;
@@ -120,6 +122,7 @@ export const usePagination = (
       if (msg.data && msg.data.bookKey === bookKey) {
         const viewSettings = getViewSettings(bookKey)!;
         if (msg.data.type === 'iframe-single-click') {
+          perfMark('input:pagination-received', { bookKey, x: msg.data.screenX });
           const viewElement = containerRef.current;
           if (viewElement) {
             const { screenX } = msg.data;
@@ -142,6 +145,10 @@ export const usePagination = (
             const viewStartX = windowStartX + viewRect.left;
             const viewCenterX = viewStartX + viewRect.width / 2;
             const consumed = eventDispatcher.dispatchSync('iframe-single-click');
+            perfMark('input:pagination-decision', {
+              bookKey, consumed, hoveredBookKey, viewStartX, width: viewRect.width,
+              x: screenX, disableClick: viewSettings.disableClick,
+            });
             if (!consumed) {
               const centerStartX = viewStartX + viewRect.width * 0.375;
               const centerEndX = viewStartX + viewRect.width * 0.625;

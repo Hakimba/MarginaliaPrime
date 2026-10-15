@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useEffectEvent } from 'react';
 import { convertBlobUrlToDataUrl, BookDoc, getDirection } from '@/libs/document';
 import { BookConfig, PageInfo } from '@/types/book';
 import { FoliateView, wrappedFoliateView } from '@/types/view';
@@ -14,7 +14,6 @@ import { useParallelViewStore } from '@/store/parallelViewStore';
 import { useChatStore } from '@/store/chatStore';
 import { useMouseEvent, useTouchEvent, useLongPressEvent } from '../hooks/useIframeEvents';
 import { usePagination } from '../hooks/usePagination';
-import { useFoliateEvents } from '../hooks/useFoliateEvents';
 import { useProgressAutoSave } from '../hooks/useProgressAutoSave';
 import { useBackgroundTexture } from '@/hooks/useBackgroundTexture';
 import { useAutoFocus } from '@/hooks/useAutoFocus';
@@ -55,7 +54,7 @@ import { lockScreenOrientation } from '@/utils/bridge';
 import { useBookCoverAutoSave } from '../hooks/useAutoSaveBookCover';
 import { manageSyntaxHighlighting } from '@/utils/highlightjs';
 import { getViewInsets } from '@/utils/insets';
-import { handleA11yNavigation } from '@/utils/a11y';
+import { createA11yNavigation } from '@/utils/a11y';
 import { isCJKLang } from '@/utils/lang';
 import { getLocale } from '@/utils/misc';
 import { isFontType } from '@/utils/font';
@@ -67,7 +66,7 @@ import {
 import { ensureBookIndex } from '@/services/bookIndex';
 import { readingOf } from '@/store/chatStore';
 import { nextMaxPage } from '@/utils/readingProgress';
-import { perfMark, perfSpan } from '@/utils/perf';
+import { perfMark, perfSpan, perfRender } from '@/utils/perf';
 import { useSelectionProbe } from '../hooks/useSelectionProbe';
 import Spinner from '@/components/Spinner';
 import ImageViewer from './ImageViewer';
@@ -93,21 +92,23 @@ const FoliateViewer: React.FC<{
   gridInsets: Insets;
   contentInsets: Insets;
 }> = ({ bookKey, bookDoc, config, gridInsets, contentInsets: insets }) => {
+  perfRender('FoliateViewer');
   const _ = useTranslation();
   const { appService, envConfig } = useEnv();
   const { themeCode, isDarkMode } = useThemeStore();
   const { settings } = useSettingsStore();
   const { loadFont, loadCustomFonts, getLoadedFonts, getAvailableFonts } = useCustomFontStore();
-  const { getView, setView: setFoliateView, setViewInited, setProgress } = useReaderStore();
-  const { getViewState, getProgress, getViewSettings, setViewSettings } = useReaderStore();
+  const { getView, setView: setFoliateView, setViewInited, setProgress } = useReaderStore.getState();
+  const { getProgress, getViewSettings, setViewSettings } = useReaderStore.getState();
   const { getParallels } = useParallelViewStore();
-  const { getBookData } = useBookDataStore();
+  const getBookData = useBookDataStore((state) => state.getBookData);
   const { applyBackgroundTexture } = useBackgroundTexture();
-  const _bookData = getBookData(bookKey);
-  const viewState = getViewState(bookKey);
-  const viewSettings = getViewSettings(bookKey);
+  const viewLoading = useReaderStore((state) => state.viewStates[bookKey]?.loading);
+  const viewSettings = useReaderStore((state) => state.viewStates[bookKey]?.viewSettings);
 
   const viewRef = useRef<FoliateView | null>(null);
+  const a11yRef = useRef<ReturnType<typeof createA11yNavigation> | null>(null);
+  const viewEventsCleanupRef = useRef<(() => void) | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const isViewCreated = useRef(false);
   const doubleClickDisabled = useRef(!!viewSettings?.disableDoubleClick);
@@ -384,6 +385,10 @@ const FoliateViewer: React.FC<{
     useChatStore.getState().setContextPending(false);
     return () => {
       disposed.current = true;
+      viewEventsCleanupRef.current?.();
+      viewEventsCleanupRef.current = null;
+      a11yRef.current?.dispose();
+      a11yRef.current = null;
       windowRun.current += 1;
       pendingWindow.current = null;
       pendingChapter.current = null;
@@ -646,7 +651,7 @@ const FoliateViewer: React.FC<{
       applyScrollModeClass(detail.doc, viewSettings.scrolled || false);
       applyScrollbarStyle(document, viewSettings.hideScrollbar || false);
       keepTextAlignment(detail.doc);
-      handleA11yNavigation(viewRef.current, detail.doc, detail.index, {
+      a11yRef.current?.observeDocument(detail.doc, detail.index, {
         skipToLastPosCallback: skipToReadingPosition,
         skipToLastPosLabel: _('Skip to last reading position'),
       });
@@ -839,12 +844,10 @@ const FoliateViewer: React.FC<{
 
   useLongPressEvent(bookKey, handleImagePress, handleTablePress);
 
-  useFoliateEvents(viewRef.current, {
-    onLoad: docLoadHandler,
-    onStabilized: stabilizedHandler,
-    onRelocate: progressRelocateHandler,
-    onRendererRelocate: docRelocateHandler,
-  });
+  const handleViewLoad = useEffectEvent(docLoadHandler);
+  const handleViewStabilized = useEffectEvent(stabilizedHandler);
+  const handleViewRelocate = useEffectEvent(progressRelocateHandler);
+  const handleRendererRelocate = useEffectEvent(docRelocateHandler);
 
   useEffect(() => {
     if (isViewCreated.current) return;
@@ -880,9 +883,33 @@ const FoliateViewer: React.FC<{
       const endViewOpen = perfSpan('book:view-open', { bookKey });
       await view.open(bookDoc);
       endViewOpen({ sections: bookDoc.sections?.length, layout: bookDoc.rendition?.layout });
+      const a11y = createA11yNavigation(view);
+      if (disposed.current) {
+        a11y.dispose();
+        return;
+      }
+      a11yRef.current?.dispose();
+      a11yRef.current = a11y;
       // make sure we can listen renderer events after opening book
       viewRef.current = view;
       setFoliateView(bookKey, view);
+
+      const renderer = view.renderer;
+      const onLoad = (event: Event) => handleViewLoad(event);
+      const onStabilized = () => handleViewStabilized();
+      const onRelocate = (event: Event) => handleViewRelocate(event);
+      const onRendererRelocate = (event: Event) => handleRendererRelocate(event);
+      viewEventsCleanupRef.current?.();
+      view.addEventListener('load', onLoad);
+      view.addEventListener('relocate', onRelocate);
+      renderer.addEventListener('stabilized', onStabilized);
+      renderer.addEventListener('relocate', onRendererRelocate);
+      viewEventsCleanupRef.current = () => {
+        view.removeEventListener('load', onLoad);
+        view.removeEventListener('relocate', onRelocate);
+        renderer.removeEventListener('stabilized', onStabilized);
+        renderer.removeEventListener('relocate', onRendererRelocate);
+      };
 
       const { book } = view;
 
@@ -1103,7 +1130,7 @@ const FoliateViewer: React.FC<{
         aria-label={_('Book Content')}
         className={clsx(
           'foliate-viewer absolute h-[100%] w-[100%] focus:outline-none',
-          viewState?.loading && 'bg-base-100',
+          viewLoading && 'bg-base-100',
         )}
         style={{
           paddingTop: scrollMargins.top,
@@ -1112,7 +1139,7 @@ const FoliateViewer: React.FC<{
         {...mouseHandlers}
         {...touchHandlers}
       />
-      {((!docLoaded.current && loading) || viewState?.loading) && (
+      {((!docLoaded.current && loading) || viewLoading) && (
         <div className='bg-base-100/85 absolute left-0 top-0 z-10 flex h-full w-full items-center justify-center'>
           <Spinner loading={true} />
         </div>

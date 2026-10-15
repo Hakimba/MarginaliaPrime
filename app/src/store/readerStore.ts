@@ -284,7 +284,7 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
             config: {
               ...bookData.config,
               updatedAt: Date.now(),
-              viewSettings,
+              viewSettings: { ...viewSettings },
             },
           },
         },
@@ -295,7 +295,7 @@ export const useReaderStore = create<ReaderStore>((set, get) => ({
         ...state.viewStates,
         [key]: {
           ...state.viewStates[key]!,
-          viewSettings,
+          viewSettings: { ...viewSettings },
         },
       },
     }));

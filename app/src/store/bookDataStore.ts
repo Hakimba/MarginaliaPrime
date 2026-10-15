@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { SystemSettings } from '@/types/settings';
 import { Book, BookConfig, BookNote } from '@/types/book';
 import { EnvConfigType } from '@/services/environment';
-import { BookDoc } from '@/libs/document';
+import { BookDoc, disposeBookDocument } from '@/libs/document';
 import { useLibraryStore } from './libraryStore';
 
 export interface BookData {
@@ -27,7 +27,7 @@ interface BookDataState {
   ) => void;
   updateBooknotes: (key: string, booknotes: BookNote[]) => BookConfig | undefined;
   getBookData: (keyOrId: string) => BookData | null;
-  clearBookData: (keyOrId: string) => void;
+  clearBookData: (keyOrId: string) => Promise<void>;
 }
 
 export const useBookDataStore = create<BookDataState>((set, get) => ({
@@ -36,14 +36,23 @@ export const useBookDataStore = create<BookDataState>((set, get) => ({
     const id = keyOrId.split('-')[0]!;
     return get().booksData[id] || null;
   },
-  clearBookData: (keyOrId: string) => {
+  clearBookData: async (keyOrId: string) => {
     const id = keyOrId.split('-')[0]!;
+    const removed = get().booksData[id];
+    if (!removed) return;
     set((state) => {
       const newBooksData = { ...state.booksData };
       delete newBooksData[id];
       return {
         booksData: newBooksData,
       };
+    });
+    const remaining = Object.values(get().booksData);
+    await disposeBookDocument({
+      bookDoc: remaining.some((data) => data.bookDoc === removed.bookDoc)
+        ? undefined : removed.bookDoc ?? undefined,
+      files: removed.file && !remaining.some((data) => data.file === removed.file)
+        ? [removed.file] : [],
     });
   },
   getConfig: (key: string | null) => {
@@ -54,18 +63,17 @@ export const useBookDataStore = create<BookDataState>((set, get) => ({
   setConfig: (key: string, partialConfig: Partial<BookConfig>) => {
     set((state: BookDataState) => {
       const id = key.split('-')[0]!;
-      const config = (state.booksData[id]?.config || null) as BookConfig;
+      const config = state.booksData[id]?.config;
       if (!config) {
 
         return state;
       }
-      Object.assign(config, partialConfig);
       return {
         booksData: {
           ...state.booksData,
           [id]: {
             ...state.booksData[id]!,
-            config,
+            config: { ...config, ...partialConfig },
           },
         },
       };

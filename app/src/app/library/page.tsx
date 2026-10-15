@@ -480,7 +480,7 @@ const LibraryPageContent = ({ searchParams }: { searchParams: ReadonlyURLSearchP
     try {
       await appService?.deleteBook(book);
       await updateBook(envConfig, book);
-      clearBookData(book.hash);
+      await clearBookData(book.hash);
       eventDispatcher.dispatch('toast', {
         type: 'info',
         timeout: 1000,

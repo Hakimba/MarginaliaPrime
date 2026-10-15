@@ -1,8 +1,9 @@
 import { DOUBLE_CLICK_INTERVAL_THRESHOLD_MS, LONG_HOLD_THRESHOLD } from '@/services/constants';
 import { eventDispatcher } from '@/utils/event';
+import { perfMark } from '@/utils/perf';
 
 let lastClickTime = 0;
-let longHoldTimeout: ReturnType<typeof setTimeout> | null = null;
+const mouseDownTimes = new WeakMap<EventTarget, number>();
 
 let keyboardState = {
   key: '',
@@ -87,9 +88,8 @@ export const handleKeyup = (bookKey: string, event: KeyboardEvent) => {
 };
 
 export const handleMousedown = (bookKey: string, event: MouseEvent) => {
-  longHoldTimeout = setTimeout(() => {
-    longHoldTimeout = null;
-  }, LONG_HOLD_THRESHOLD);
+  perfMark('input:iframe-down', { bookKey, x: event.screenX, y: event.screenY, button: event.button });
+  if (event.currentTarget) mouseDownTimes.set(event.currentTarget, event.timeStamp);
 
   window.postMessage(
     {
@@ -109,6 +109,7 @@ export const handleMousedown = (bookKey: string, event: MouseEvent) => {
 };
 
 export const handleMouseup = (bookKey: string, event: MouseEvent) => {
+  perfMark('input:iframe-up', { bookKey, x: event.screenX, y: event.screenY, button: event.button });
   // we will handle mouse back and forward buttons ourselves
   if ([3, 4].includes(event.button)) {
     event.preventDefault();
@@ -157,6 +158,9 @@ export const handleClick = (
   event: MouseEvent,
 ) => {
   const now = Date.now();
+  const downAt = event.currentTarget ? mouseDownTimes.get(event.currentTarget) : undefined;
+  const shortPress = downAt !== undefined && event.timeStamp - downAt < LONG_HOLD_THRESHOLD;
+  perfMark('input:iframe-click', { bookKey, x: event.screenX, y: event.screenY, detail: event.detail });
 
   if (!doubleClickDisabled.current && now - lastClickTime < DOUBLE_CLICK_INTERVAL_THRESHOLD_MS) {
     lastClickTime = now;
@@ -180,6 +184,7 @@ export const handleClick = (
   lastClickTime = now;
 
   const postSingleClick = () => {
+    perfMark('input:single-click-check', { bookKey, shortPress });
     const element = event.target as HTMLElement | null;
     if (
       element?.closest('sup, a, audio, video') &&
@@ -209,7 +214,7 @@ export const handleClick = (
     }
 
     // if long hold is detected, we don't want to send single click event
-    if (!longHoldTimeout) {
+    if (!shortPress) {
       return;
     }
 

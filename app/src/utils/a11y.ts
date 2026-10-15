@@ -2,37 +2,59 @@ import { FoliateView } from '@/types/view';
 import { throttle } from './throttle';
 import { debounce } from './debounce';
 
-export const handleA11yNavigation = (
-  view: FoliateView | null,
-  document: Document,
-  index: number,
-  options?: { skipToLastPosCallback: () => void; skipToLastPosLabel: string },
-) => {
-  if (!view) return;
+type NavigationState = { disposed: boolean; hasRecentRelocate: boolean };
+type NavigationOptions = { skipToLastPosCallback: () => void; skipToLastPosLabel: string };
+type NavigationView = Pick<FoliateView, 'getCFI' | 'resolveNavigation'> & {
+  renderer: Pick<FoliateView['renderer'], 'addEventListener' | 'removeEventListener' | 'goTo'>;
+};
 
-  const state = {
-    skipInitial: true,
-    hasRecentRelocate: false,
-    relocateTimer: null as ReturnType<typeof setTimeout> | null,
-  };
-
+export const createA11yNavigation = (view: NavigationView) => {
+  const state: NavigationState = { disposed: false, hasRecentRelocate: false };
+  const documents = new WeakSet<Document>();
   const markRelocateEnd = debounce(() => {
     state.hasRecentRelocate = false;
   }, 2000);
-
-  const markRelocated = () => {
+  const markRelocated = throttle(() => {
+    if (state.disposed) return;
     state.hasRecentRelocate = true;
     markRelocateEnd();
+  }, 1000);
+  const renderer = view.renderer;
+  renderer.addEventListener('scroll', markRelocated, { passive: true });
+  renderer.addEventListener('relocate', markRelocated);
+
+  return {
+    observeDocument(document: Document, index: number, options?: NavigationOptions) {
+      if (state.disposed || documents.has(document)) return;
+      documents.add(document);
+      observeDocument(view, state, document, index, options);
+    },
+    dispose() {
+      if (state.disposed) return;
+      state.disposed = true;
+      renderer.removeEventListener('scroll', markRelocated);
+      renderer.removeEventListener('relocate', markRelocated);
+      markRelocateEnd.cancel();
+    },
   };
+};
 
-  const throttledMarkRelocated = throttle(markRelocated, 1000);
-  view.renderer.addEventListener('scroll', throttledMarkRelocated, { passive: true });
-  view.renderer.addEventListener('relocate', throttledMarkRelocated);
-
+const observeDocument = (
+  view: NavigationView,
+  state: NavigationState,
+  document: Document,
+  index: number,
+  options?: NavigationOptions,
+) => {
+  let skipInitial = true;
   const observer = new IntersectionObserver(
     (entries) => {
-      if (state.skipInitial) {
-        state.skipInitial = false;
+      if (state.disposed) {
+        observer.disconnect();
+        return;
+      }
+      if (skipInitial) {
+        skipInitial = false;
         return;
       }
       if (state.hasRecentRelocate) return;
@@ -42,10 +64,9 @@ export const handleA11yNavigation = (
           range.selectNodeContents(entry.target);
           const cfi = view.getCFI(index, range);
           setTimeout(() => {
-            if (state.hasRecentRelocate) return;
+            if (state.disposed || state.hasRecentRelocate) return;
             const resolved = view.resolveNavigation(cfi);
             view.renderer.goTo?.(resolved);
-
           }, 500);
           break;
         }
@@ -86,7 +107,7 @@ export const handleA11yNavigation = (
     skipLink.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      options?.skipToLastPosCallback();
+      if (!state.disposed) options?.skipToLastPosCallback();
     });
     document.body.prepend(skipLink);
   }

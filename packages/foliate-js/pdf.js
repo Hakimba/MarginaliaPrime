@@ -28,13 +28,25 @@ const fetchText = async url => await (await fetch(url)).text()
 // throws there ("undefined is not a function"): the stream has to be drained
 // through a reader.
 const readTextItems = async page => {
+    const start = globalThis.__perfMark ? performance.now() : 0
+    globalThis.__perfMark?.('pdf:text-read-start', { page: page.pageNumber, source: 'items' })
+    let chunks = 0
+    let styleEntries = 0
     const reader = page.streamTextContent().getReader()
     const items = []
     for (;;) {
         const { done, value } = await reader.read()
         if (done) break
+        if (globalThis.__perfMark) {
+            chunks++
+            styleEntries += Object.keys(value?.styles ?? {}).length
+        }
         if (value?.items) items.push(...value.items)
     }
+    globalThis.__perfMark?.('pdf:text-read-completed', {
+        page: page.pageNumber, source: 'items', items: items.length, chunks, styleEntries,
+        dur: performance.now() - start,
+    })
     return items
 }
 
@@ -55,7 +67,7 @@ const scheduleFormulas = (page, doc, generation) => {
         if (!doc.defaultView || renderGenerations.get(doc) !== generation) return
         let zones = formulaCache.get(page)
         if (!zones) {
-            const start = performance.now()
+            const start = globalThis.__perfMark ? performance.now() : 0
             try {
                 // A turned page would need turned glyph boxes: left alone.
                 if (page.rotate % 360) throw new Error('rotated page')
@@ -104,6 +116,7 @@ const scheduleFormulas = (page, doc, generation) => {
         if (!doc.defaultView || renderGenerations.get(doc) !== generation) return
         doc.__pdfFormulas = { page: page.pageNumber, zones }
         doc.dispatchEvent(new CustomEvent('pdf-formulas', { detail: doc.__pdfFormulas }))
+        globalThis.__perfMark?.('pdf:formulas-published', { page: page.pageNumber, generation, count: zones.length })
     }
     const idle = globalThis.requestIdleCallback
     if (typeof idle === 'function') idle(() => void run(), { timeout: 2000 })
@@ -226,7 +239,56 @@ const setupPanningEvents = (doc) => {
     doc.addEventListener('selectionchange', () => clampSelectionToZone(doc))
 }
 
-const render = async (page, doc, zoom) => {
+const renderSlots = new WeakMap()
+const hasGeometry = doc => {
+    const rect = doc.querySelector('.textLayer')?.getBoundingClientRect()
+    return !!doc.defaultView && rect?.width > 0 && rect?.height > 0
+}
+
+const render = (page, doc, zoom, ownerDocument) => {
+    if (!doc) return Promise.resolve({ kind: 'cancelled' })
+    const dpr = devicePixelRatio
+    const previous = renderSlots.get(doc)
+    const sameKey = previous?.page === page && previous.zoom === zoom && previous.dpr === dpr
+    if (sameKey && previous.kind === 'running') return previous.promise
+    if (sameKey && previous.kind === 'ready' && hasGeometry(doc)) {
+        globalThis.__perfMark?.('pdf:render-cache-hit', {
+            page: page.pageNumber, generation: renderGenerations.get(doc),
+            scale: zoom * dpr, zoom, dpr,
+        })
+        return Promise.resolve({ kind: 'ready' })
+    }
+    const slot = { kind: 'running', page, zoom, dpr }
+    renderSlots.set(doc, slot)
+    activeRenderTasks.get(doc)?.cancel()
+    slot.promise = (async () => {
+        try {
+            if (previous?.kind === 'running') {
+                try { await previous.promise } catch {}
+            }
+            if (renderSlots.get(doc) !== slot) return { kind: 'cancelled' }
+            const outcome = await renderPipeline(page, doc, zoom, dpr, ownerDocument)
+            if (renderSlots.get(doc) === slot) {
+                if (outcome?.kind === 'ready' && hasGeometry(doc)) slot.kind = 'ready'
+                else renderSlots.delete(doc)
+            }
+            return outcome ?? { kind: 'cancelled' }
+        } catch (cause) {
+            if (renderSlots.get(doc) === slot) {
+                renderSlots.delete(doc)
+                if (globalThis.__perfMark) {
+                    const generation = renderGenerations.get(doc)
+                    doc.__marginaliaPerfRender = { page: page.pageNumber, generation, status: 'failed' }
+                    globalThis.__perfMark('pdf:render-aborted', { page: page.pageNumber, generation, status: 'failed' })
+                }
+            }
+            throw cause
+        }
+    })()
+    return slot.promise
+}
+
+const renderPipeline = async (page, doc, zoom, dpr, ownerDocument) => {
     if (!doc) return
 
     // Increment generation to invalidate any in-progress render for this doc
@@ -240,9 +302,12 @@ const render = async (page, doc, zoom) => {
         activeRenderTasks.delete(doc)
     }
 
-    const scale = zoom * devicePixelRatio
-    const perfStart = performance.now()
-    doc.documentElement.style.transform = `scale(${1 / devicePixelRatio})`
+    const scale = zoom * dpr
+    const perfStart = globalThis.__perfMark ? performance.now() : 0
+    let phaseStart = perfStart
+    if (globalThis.__perfMark) doc.__marginaliaPerfRender = { page: page.pageNumber, generation, status: 'running' }
+    globalThis.__perfMark?.('pdf:render-start', { page: page.pageNumber, generation, scale, zoom, dpr: devicePixelRatio })
+    doc.documentElement.style.transform = `scale(${1 / dpr})`
     doc.documentElement.style.transformOrigin = 'top left'
     doc.documentElement.style.setProperty('--total-scale-factor', scale)
     doc.documentElement.style.setProperty('--user-unit', '1')
@@ -250,9 +315,7 @@ const render = async (page, doc, zoom) => {
     doc.documentElement.style.setProperty('--scale-round-y', '1px')
     const viewport = page.getViewport({ scale })
 
-    // the canvas must be in the `PDFDocument`'s `ownerDocument`
-    // (`globalThis.document` by default); that's where the fonts are loaded
-    const canvas = document.createElement('canvas')
+    const canvas = ownerDocument.createElement('canvas')
     canvas.height = viewport.height
     canvas.width = viewport.width
     const canvasContext = canvas.getContext('2d')
@@ -261,11 +324,17 @@ const render = async (page, doc, zoom) => {
 
     try {
         await renderTask.promise
-    } catch {
+    } catch (error) {
         // Render was cancelled or failed — release canvas bitmap memory
+        if (globalThis.__perfMark) {
+            const status = error?.name === 'RenderingCancelledException' ? 'cancelled' : 'failed'
+            if (renderGenerations.get(doc) === generation) doc.__marginaliaPerfRender = { page: page.pageNumber, generation, status }
+            globalThis.__perfMark('pdf:render-aborted', { page: page.pageNumber, generation, status })
+        }
         canvas.width = 0
         canvas.height = 0
-        return
+        if (error?.name === 'RenderingCancelledException') return { kind: 'cancelled' }
+        throw error
     } finally {
         if (activeRenderTasks.get(doc) === renderTask) {
             activeRenderTasks.delete(doc)
@@ -274,6 +343,7 @@ const render = async (page, doc, zoom) => {
 
     // Bail out if a newer render has started or iframe was removed
     if (renderGenerations.get(doc) !== generation || !doc.defaultView) {
+        if (globalThis.__perfMark && renderGenerations.get(doc) === generation) doc.__marginaliaPerfRender = { page: page.pageNumber, generation, status: 'detached' }
         canvas.width = 0
         canvas.height = 0
         return
@@ -281,6 +351,7 @@ const render = async (page, doc, zoom) => {
 
     const canvasElement = doc.querySelector('#canvas')
     if (!canvasElement) {
+        if (globalThis.__perfMark) doc.__marginaliaPerfRender = { page: page.pageNumber, generation, status: 'detached' }
         canvas.width = 0
         canvas.height = 0
         return
@@ -294,6 +365,11 @@ const render = async (page, doc, zoom) => {
     }
     canvasElement.replaceChildren(doc.adoptNode(canvas))
 
+    globalThis.__perfMark?.('pdf:render-phase', {
+        page: page.pageNumber, generation, phase: 'canvas', dur: performance.now() - phaseStart,
+    })
+    if (globalThis.__perfMark) phaseStart = performance.now()
+    globalThis.__perfMark?.('pdf:text-read-start', { page: page.pageNumber, source: 'text-layer' })
     // Clear text layer before re-rendering to prevent DOM accumulation
     const container = doc.querySelector('.textLayer')
     container.replaceChildren()
@@ -302,20 +378,34 @@ const render = async (page, doc, zoom) => {
         container, viewport,
     })
     await textLayer.render()
+    globalThis.__perfMark?.('pdf:text-read-completed', { page: page.pageNumber, source: 'text-layer' })
+    globalThis.__perfMark?.('pdf:render-phase', {
+        page: page.pageNumber, generation, phase: 'text', dur: performance.now() - phaseStart,
+    })
+    if (globalThis.__perfMark) phaseStart = performance.now()
 
     // Bail out if superseded after async text layer render
-    if (renderGenerations.get(doc) !== generation) return
+    if (renderGenerations.get(doc) !== generation) {
+        globalThis.__perfMark?.('pdf:render-aborted', { page: page.pageNumber, generation, status: 'superseded' })
+        return
+    }
 
     // A PDF stores text in the producer's order, not the reader's: marginal
     // notes are interleaved with the body and glyphs jump around formulas.
     // Selection follows the DOM, so it is re-ordered to follow the eye.  A
     // layout heuristic must never cost the page itself, hence the guard.
+    let geometryReady = hasGeometry(doc)
     try {
         applyReadingOrder(container)
     } catch (e) {
+        geometryReady = false
         console.error('pdf: reading order failed', e)
     }
 
+    globalThis.__perfMark?.('pdf:render-phase', {
+        page: page.pageNumber, generation, phase: 'order', dur: performance.now() - phaseStart,
+    })
+    if (globalThis.__perfMark) phaseStart = performance.now()
     globalThis.__perfMark?.('pdf:render', {
         page: page.pageNumber, scale: Math.round(scale * 100) / 100,
         dur: Math.round(performance.now() - perfStart),
@@ -347,9 +437,14 @@ const render = async (page, doc, zoom) => {
     try {
         doc._marginaliaSelection = installGeometrySelection(doc, container)
     } catch (e) {
+        geometryReady = false
         console.error('pdf: geometry selection unavailable', e)
     }
 
+    globalThis.__perfMark?.('pdf:render-phase', {
+        page: page.pageNumber, generation, phase: 'selection', dur: performance.now() - phaseStart,
+    })
+    if (globalThis.__perfMark) phaseStart = performance.now()
     // Clear annotation layer before re-rendering to prevent DOM accumulation
     const div = doc.querySelector('.annotationLayer')
     div.replaceChildren()
@@ -362,23 +457,35 @@ const render = async (page, doc, zoom) => {
         annotations: await page.getAnnotations(),
     })
 
+    globalThis.__perfMark?.('pdf:render-phase', {
+        page: page.pageNumber, generation, phase: 'annotations', dur: performance.now() - phaseStart,
+    })
+    if (renderGenerations.get(doc) === generation && geometryReady && hasGeometry(doc)) {
+        if (globalThis.__perfMark) doc.__marginaliaPerfRender = { page: page.pageNumber, generation, status: 'completed' }
+        globalThis.__perfMark?.('pdf:render-completed', {
+            page: page.pageNumber, generation, scale, zoom, dpr: devicePixelRatio,
+            dur: performance.now() - perfStart,
+        })
+    }
     scheduleFormulas(page, doc, generation)
+    return renderGenerations.get(doc) === generation && geometryReady && hasGeometry(doc)
+        ? { kind: 'ready' } : { kind: 'cancelled' }
 }
 
-const renderPage = async (page, getImageBlob) => {
+const renderPage = async (page, ownerDocument, getImageBlob) => {
     const viewport = page.getViewport({ scale: 1 })
     if (getImageBlob) {
-        const canvas = document.createElement('canvas')
+        const canvas = ownerDocument.createElement('canvas')
         canvas.height = viewport.height
         canvas.width = viewport.width
         const canvasContext = canvas.getContext('2d')
-        await page.render({ canvasContext, viewport }).promise
-        return new Promise(resolve => canvas.toBlob(blob => {
-            // Release canvas bitmap memory after extracting the blob
+        try {
+            await page.render({ canvasContext, viewport }).promise
+            return await new Promise(resolve => canvas.toBlob(resolve))
+        } finally {
             canvas.width = 0
             canvas.height = 0
-            resolve(blob)
-        }))
+        }
     }
     // https://github.com/mozilla/pdf.js/blob/642b9a5ae67ef642b9a8808fd9efd447e8c350e2/web/text_layer_builder.css
     if (textLayerBuilderCSS == null) {
@@ -409,7 +516,7 @@ const renderPage = async (page, getImageBlob) => {
         <div class="annotationLayer"></div>
     `
     const src = URL.createObjectURL(new Blob([data], { type: 'text/html' }))
-    const onZoom = ({ doc, scale }) => render(page, doc, scale)
+    const onZoom = ({ doc, scale }) => render(page, doc, scale, ownerDocument)
     globalThis.__perfMark?.('pdf:page-html', { page: page.pageNumber })
     return { src, data, onZoom }
 }
@@ -448,20 +555,34 @@ const makeTOCItem = async (item, pdf, indexByHref) => {
 const MAX_CACHED_PAGES = 8
 
 export const makePDF = async file => {
+    const ownerDocument = document.implementation.createHTMLDocument('')
     const transport = new pdfjsLib.PDFDataRangeTransport(file.size, [])
     transport.requestDataRange = (begin, end) => {
         file.slice(begin, end).arrayBuffer().then(chunk => {
             transport.onDataRange(begin, chunk)
         })
     }
-    const pdf = await pdfjsLib.getDocument({
+    const loadingTask = pdfjsLib.getDocument({
+        ownerDocument,
         range: transport,
         wasmUrl: pdfjsPath(''),
         cMapUrl: pdfjsPath('cmaps/'),
         standardFontDataUrl: pdfjsPath('standard_fonts/'),
         isEvalSupported: false,
-    }).promise
+    })
+    try {
+        return await makePDFBook(await loadingTask.promise, ownerDocument)
+    } catch (cause) {
+        try {
+            await loadingTask.destroy()
+        } catch (cleanupError) {
+            throw new AggregateError([cause, cleanupError], 'PDF initialization and cleanup failed', { cause })
+        }
+        throw cause
+    }
+}
 
+const makePDFBook = async (pdf, ownerDocument) => {
     // Get viewport dimensions from first page for fixed-layout rendering
     const firstPage = await pdf.getPage(1)
     const firstViewport = firstPage.getViewport({ scale: 1 })
@@ -493,7 +614,12 @@ export const makePDF = async file => {
 
     const cache = new Map()
     const pageCache = new Map()
+    let destruction
+    const assertOpen = () => {
+        if (destruction) throw new Error('PDF document is destroyed')
+    }
     const getPage = async (i) => {
+        assertOpen()
         const cached = pageCache.get(i)
         if (cached) {
             // Move to end for LRU ordering
@@ -502,6 +628,7 @@ export const makePDF = async file => {
             return cached
         }
         const page = await pdf.getPage(i + 1)
+        assertOpen()
         pageCache.set(i, page)
 
         // Evict oldest pages when over limit, freeing internal page data
@@ -509,6 +636,9 @@ export const makePDF = async file => {
             const oldestKey = pageCache.keys().next().value
             const oldPage = pageCache.get(oldestKey)
             pageCache.delete(oldestKey)
+            globalThis.__perfMark?.('pdf:page-cleanup', {
+                page: oldestKey + 1, cacheSize: pageCache.size, reason: 'lru',
+            })
             oldPage?.cleanup()
         }
 
@@ -534,13 +664,14 @@ export const makePDF = async file => {
         const maxSide = 1400
         const k = Math.min(scale, maxSide / Math.max(drawn.w, drawn.h, 1))
         const viewport = page.getViewport({ scale: k, offsetX: -drawn.x * k, offsetY: -drawn.y * k })
-        const canvas = document.createElement('canvas')
+        const canvas = ownerDocument.createElement('canvas')
         canvas.width = Math.max(1, Math.ceil(drawn.w * k))
         canvas.height = Math.max(1, Math.ceil(drawn.h * k))
         const canvasContext = canvas.getContext('2d', { willReadFrequently: fitLines })
         let out = canvas
         try {
             await page.render({ canvasContext, viewport, background: '#ffffff' }).promise
+            assertOpen()
             if (fitLines) {
                 const { data } = canvasContext.getImageData(0, 0, canvas.width, canvas.height)
                 const coreTop = Math.round((rect.y - drawn.y) * k)
@@ -553,7 +684,7 @@ export const makePDF = async file => {
                     Math.round(Math.min(FIT_GUARD, rect.h / 4) * k))
                     // Nothing recognisable as lines: the boxes, as they are.
                     ?? { top: coreTop, bottom: coreBottom }
-                out = document.createElement('canvas')
+                out = ownerDocument.createElement('canvas')
                 out.width = canvas.width
                 out.height = Math.max(1, rows.bottom - rows.top)
                 out.getContext('2d').drawImage(canvas, 0, rows.top, canvas.width, out.height,
@@ -572,6 +703,7 @@ export const makePDF = async file => {
     book.sections = Array.from({ length: pdf.numPages }).map((_, i) => ({
         id: i,
         load: async () => {
+            assertOpen()
             const cached = cache.get(i)
             if (cached) {
                 // Move to end for LRU ordering
@@ -579,7 +711,16 @@ export const makePDF = async file => {
                 cache.set(i, cached)
                 return cached
             }
-            const url = await renderPage(await getPage(i))
+            const url = await renderPage(await getPage(i), ownerDocument)
+            if (destruction) {
+                URL.revokeObjectURL(url.src)
+                assertOpen()
+            }
+            const onZoom = url.onZoom
+            url.onZoom = options => {
+                assertOpen()
+                return onZoom(options)
+            }
             cache.set(i, url)
 
             // Evict oldest render results when over limit
@@ -595,7 +736,7 @@ export const makePDF = async file => {
         createDocument: async () => {
             const page = await getPage(i)
             const doc = document.implementation.createHTMLDocument('')
-            const perfStart = performance.now()
+            const perfStart = globalThis.__perfMark ? performance.now() : 0
 
             const canvas = doc.createElement('div')
             canvas.id = 'canvas'
@@ -672,6 +813,7 @@ export const makePDF = async file => {
             globalThis.__perfMark?.('pdf:create-doc', {
                 page: page.pageNumber, dur: Math.round(performance.now() - perfStart),
             })
+            assertOpen()
             return doc
         },
         size: 1000,
@@ -700,18 +842,27 @@ export const makePDF = async file => {
         }
     }
     book.getTOCFragment = doc => doc.documentElement
-    book.getCover = async () => renderPage(await pdf.getPage(1), true)
+    book.getCover = async () => {
+        const blob = await renderPage(await getPage(0), ownerDocument, true)
+        assertOpen()
+        return blob
+    }
     book.destroy = () => {
+        if (destruction) return destruction
         // Clean up all cached canvases and revoke blob URLs
         for (const [, entry] of cache) {
             if (entry?.src) URL.revokeObjectURL(entry.src)
         }
         cache.clear()
-        for (const [, page] of pageCache) {
+        for (const [index, page] of pageCache) {
+            globalThis.__perfMark?.('pdf:page-cleanup', {
+                page: index + 1, cacheSize: pageCache.size, reason: 'destroy',
+            })
             page?.cleanup()
         }
         pageCache.clear()
-        pdf.destroy()
+        destruction = pdf.destroy()
+        return destruction
     }
     return book
 }

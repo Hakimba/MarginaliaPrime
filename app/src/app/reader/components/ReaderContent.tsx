@@ -1,5 +1,6 @@
 'use client';
 
+import { perfRender } from '@/utils/perf';
 import React, { useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
@@ -34,6 +35,7 @@ import BooksGrid from './BooksGrid';
 import SettingsDialog from '@/components/settings/SettingsDialog';
 
 const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ ids, settings }) => {
+  perfRender('ReaderContent');
   const _ = useTranslation();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -41,10 +43,23 @@ const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ i
   const { bookKeys, dismissBook, getNextBookKey } = useBooksManager();
   const { sideBarBookKey, setSideBarBookKey } = useSidebarStore();
   const { saveSettings } = useSettingsStore();
-  const { getConfig, getBookData, saveConfig } = useBookDataStore();
-  const { getView, setBookKeys, getViewSettings } = useReaderStore();
-  const { initViewState, getViewState, clearViewState } = useReaderStore();
+  const getConfig = useBookDataStore((state) => state.getConfig);
+  const getBookData = useBookDataStore((state) => state.getBookData);
+  const saveConfig = useBookDataStore((state) => state.saveConfig);
+  const getView = useReaderStore((state) => state.getView);
+  const setBookKeys = useReaderStore((state) => state.setBookKeys);
+  const initViewState = useReaderStore((state) => state.initViewState);
+  const getViewState = useReaderStore((state) => state.getViewState);
+  const clearViewState = useReaderStore((state) => state.clearViewState);
   const { isSettingsDialogOpen, settingsDialogBookKey } = useSettingsStore();
+  const firstBookKey = bookKeys[0];
+  const bookReady = useBookDataStore((state) => {
+    const data = firstBookKey ? state.booksData[firstBookKey.split('-')[0]!] : null;
+    return !!(data?.book && data.bookDoc);
+  });
+  const viewReady = useReaderStore((state) =>
+    !!(firstBookKey && state.viewStates[firstBookKey]?.viewSettings),
+  );
   const [showDetailsBook, setShowDetailsBook] = useState<Book | null>(null);
   const isInitiating = useRef(false);
   const [loading, setLoading] = useState(false);
@@ -200,9 +215,7 @@ const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ i
   };
 
   if (!bookKeys || bookKeys.length === 0) return null;
-  const bookData = getBookData(bookKeys[0]!);
-  const viewSettings = getViewSettings(bookKeys[0]!);
-  if (!bookData || !bookData.book || !bookData.bookDoc || !viewSettings) {
+  if (!bookReady || !viewReady) {
     setTimeout(() => setLoading(true), 200);
     return (
       loading &&
@@ -236,4 +249,4 @@ const ReaderContent: React.FC<{ ids?: string; settings: SystemSettings }> = ({ i
   );
 };
 
-export default ReaderContent;
+export default React.memo(ReaderContent);

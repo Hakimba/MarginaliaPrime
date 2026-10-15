@@ -75,6 +75,38 @@ export interface BookDoc {
   transformTarget?: EventTarget;
   splitTOCHref(href: string): Array<string | number>;
   getCover(): Promise<Blob | null>;
+  destroy?(): void | Promise<void>;
+}
+
+export async function disposeBookDocument({
+  bookDoc,
+  files,
+  operationErrors = [],
+}: {
+  bookDoc: BookDoc | undefined;
+  files: Iterable<File>;
+  operationErrors?: readonly unknown[];
+}): Promise<void> {
+  const cleanupErrors: unknown[] = [];
+  try {
+    await bookDoc?.destroy?.();
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  for (const file of files) {
+    try {
+      if ('close' in file && typeof file.close === 'function') {
+        await file.close();
+      }
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (cleanupErrors.length) {
+    const errors = [...operationErrors, ...cleanupErrors];
+    if (errors.length === 1) throw errors[0];
+    throw new AggregateError(errors, 'Book operation and cleanup failed', { cause: errors[0] });
+  }
 }
 
 export const EXTS: Record<BookFormat, string> = {

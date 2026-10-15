@@ -1,3 +1,4 @@
+import { perfRender } from '@/utils/perf';
 import clsx from 'clsx';
 import React, { useEffect, useState } from 'react';
 
@@ -31,12 +32,18 @@ interface BooksGridProps {
   onGoToLibrary: () => void;
 }
 
+const BookmarkRibbon: React.FC<{ width: string }> = ({ width }) => {
+  const hoveredBookKey = useReaderStore((state) => state.hoveredBookKey);
+  return hoveredBookKey ? null : <Ribbon width={width} />;
+};
+
 const BooksGrid: React.FC<BooksGridProps> = ({ bookKeys, onCloseBook, onGoToLibrary }) => {
+  perfRender('BooksGrid');
   const _ = useTranslation();
   const { appService } = useEnv();
-  const { getConfig, getBookData } = useBookDataStore();
-  const { getProgress, getViewState, getViewSettings } = useReaderStore();
-  const { setGridInsets, hoveredBookKey } = useReaderStore();
+  const booksData = useBookDataStore((state) => state.booksData);
+  const viewStates = useReaderStore((state) => state.viewStates);
+  const setGridInsets = useReaderStore((state) => state.setGridInsets);
   const { sideBarBookKey } = useSidebarStore();
   const [dropdownOpenBook, setDropdownOpenBook] = useState<string>('');
 
@@ -46,10 +53,9 @@ const BooksGrid: React.FC<BooksGridProps> = ({ bookKeys, onCloseBook, onGoToLibr
 
   useEffect(() => {
     if (!sideBarBookKey) return;
-    const bookData = getBookData(sideBarBookKey);
+    const bookData = useBookDataStore.getState().getBookData(sideBarBookKey);
     if (!bookData || !bookData.book) return;
     document.title = bookData.book.title;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sideBarBookKey]);
 
   const calcGridInsets = (index: number, count: number) => {
@@ -85,11 +91,11 @@ const BooksGrid: React.FC<BooksGridProps> = ({ bookKeys, onCloseBook, onGoToLibr
       aria-label={_('Books Content')}
     >
       {bookKeys.map((bookKey, index) => {
-        const bookData = getBookData(bookKey);
-        const config = getConfig(bookKey);
-        const progress = getProgress(bookKey);
-        const viewSettings = getViewSettings(bookKey);
-        const viewState = getViewState(bookKey);
+        const bookData = booksData[bookKey.split('-')[0]!];
+        const config = bookData?.config;
+        const viewState = viewStates[bookKey];
+        const progress = viewState?.progress;
+        const viewSettings = viewState?.viewSettings;
         const gridInsets = calcGridInsets(index, bookKeys.length);
         const { book, bookDoc } = bookData || {};
         if (!book || !config || !bookDoc || !viewSettings || !viewState) return null;
@@ -119,7 +125,7 @@ const BooksGrid: React.FC<BooksGridProps> = ({ bookKeys, onCloseBook, onGoToLibr
               appService?.hasRoundedWindow && 'rounded-window',
             )}
           >
-            {isBookmarked && !hoveredBookKey && <Ribbon width={`${horizontalGapPercent}%`} />}
+            {isBookmarked && <BookmarkRibbon width={`${horizontalGapPercent}%`} />}
             <HeaderBar
               bookKey={bookKey}
               gridInsets={gridInsets}

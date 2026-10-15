@@ -6,8 +6,9 @@ import { useSettingsStore } from '@/store/settingsStore';
 // Note that the book content is rendered in an iframe, so UI CSS won't affect book rendering.
 export const useUICSS = (bookKey?: string) => {
   const { settings } = useSettingsStore();
-  const { getViewSettings } = useReaderStore();
-  const viewSettings = getViewSettings(bookKey || '');
+  const userUIStylesheet = useReaderStore(
+    (state) => state.viewStates[bookKey || '']?.viewSettings?.userUIStylesheet,
+  );
   const [styleElement, setStyleElement] = useState<HTMLStyleElement | null>(null);
 
   useEffect(() => {
@@ -16,7 +17,7 @@ export const useUICSS = (bookKey?: string) => {
     }
 
     const rawCSS =
-      viewSettings?.userUIStylesheet || settings?.globalViewSettings?.userUIStylesheet || '';
+      userUIStylesheet || settings?.globalViewSettings?.userUIStylesheet || '';
 
     const newStyleEl = document.createElement('style');
     newStyleEl.textContent = rawCSS.replace('foliate-view', `#foliate-view-${bookKey}`);
@@ -27,5 +28,5 @@ export const useUICSS = (bookKey?: string) => {
       newStyleEl.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewSettings?.userUIStylesheet, settings?.globalViewSettings?.userUIStylesheet, bookKey]);
+  }, [userUIStylesheet, settings?.globalViewSettings?.userUIStylesheet, bookKey]);
 };

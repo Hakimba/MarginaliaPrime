@@ -11,8 +11,9 @@ const useBooksManager = () => {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { envConfig } = useEnv();
-  const { bookKeys } = useReaderStore();
-  const { setBookKeys, initViewState } = useReaderStore();
+  const bookKeys = useReaderStore((state) => state.bookKeys);
+  const setBookKeys = useReaderStore((state) => state.setBookKeys);
+  const initViewState = useReaderStore((state) => state.initViewState);
   const { sideBarBookKey, setSideBarBookKey } = useSidebarStore();
   const [shouldUpdateSearchParams, setShouldUpdateSearchParams] = useState(false);
   const { setParallel } = useParallelViewStore();

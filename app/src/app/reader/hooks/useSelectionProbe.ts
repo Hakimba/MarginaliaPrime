@@ -375,7 +375,7 @@ const runProbe = async (doc: Document, view?: unknown) => {
 };
 
 export const useSelectionProbe = (bookKey: string) => {
-  const { getView } = useReaderStore();
+  const getView = useReaderStore((state) => state.getView);
   const fired = useRef(false);
 
   useEffect(() => {

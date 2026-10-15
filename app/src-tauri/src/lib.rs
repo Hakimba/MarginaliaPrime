@@ -216,8 +216,14 @@ pub fn run() {
             #[cfg(not(target_os = "linux"))]
             let is_appimage = false;
 
+            let perf_enabled = std::env::var("MARGINALIA_PERF").as_deref() == Ok("1");
+            let perf_open = serde_json::to_string(
+                &std::env::var("MARGINALIA_PERF_OPEN").unwrap_or_default(),
+            )?;
             let init_script = format!(
                 r#"
+                    window.__MARGINALIA_PERF = {perf_enabled};
+                    window.__MARGINALIA_PERF_OPEN = {perf_open};
                     if ({cli_access}) window.__MARGINALIA_CLI_ACCESS = true;
                     if ({is_appimage}) window.__MARGINALIA_IS_APPIMAGE = true;
                     window.OPEN_WITH_FILES = {open_with_files};
@@ -248,10 +254,7 @@ pub fn run() {
                                     parts.push(a && a.stack ? a.stack : (typeof a === 'object' ? JSON.stringify(a) : String(a)));
                                 }}
                                 var text = parts.join(' ');
-                                // Perf marks log themselves already; don't duplicate them.
-                                if (text.indexOf('[perf]') !== 0) {{
-                                    report('console.' + level + ': ' + text.slice(0, 2000), levelOf[level]);
-                                }}
+                                report('console.' + level + ': ' + text.slice(0, 2000), levelOf[level]);
                                 orig.apply(console, arguments);
                             }};
                         }});

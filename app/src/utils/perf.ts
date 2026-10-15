@@ -1,65 +1,95 @@
-/**
- * Lightweight performance marks for the T0.5 audit.
- *
- * Each mark is written to the console and, when running inside Tauri, to the
- * application log file via tauri-plugin-log so that timings can be read back
- * without a debugger. `t` is milliseconds since the webview navigation start;
- * the first mark also records `performance.timeOrigin` (epoch ms) so log lines
- * can be aligned with the Rust side and the process start time.
- */
-let logInfo: ((msg: string) => Promise<void>) | null = null;
-let logInit = false;
-
-const ensureLogger = async () => {
-  if (logInit) return;
-  logInit = true;
-  try {
-    const mod = await import('@tauri-apps/plugin-log');
-    logInfo = mod.info;
-  } catch {
-    logInfo = null;
-  }
-};
-
-export const perfMark = (name: string, extra?: Record<string, unknown>) => {
-  const t = Math.round(performance.now());
-  const payload = { t, ...(extra ?? {}) };
-  const line = `[perf] ${name} ${JSON.stringify(payload)}`;
-  console.info(line);
-  void ensureLogger().then(() => logInfo?.(line).catch(() => {}));
-};
-
-/** Returns a function that ends the span and records its duration. */
-export const perfSpan = (name: string, extra?: Record<string, unknown>) => {
-  const start = performance.now();
-  return (more?: Record<string, unknown>) =>
-    perfMark(name, { ...(extra ?? {}), ...(more ?? {}), dur: Math.round(performance.now() - start) });
-};
-
-/**
- * Measurement helper: when the app is launched with MARGINALIA_PERF_OPEN=<book hash>
- * in its environment, the library opens that book as soon as it is ready. This
- * reproduces the "click on a book" path end to end for timing purposes.
- */
-export const perfAutoOpen = async (open: (hash: string) => void) => {
-  try {
-    const { invoke } = await import('@tauri-apps/api/core');
-    const hash = await invoke<string>('get_environment_variable', { name: 'MARGINALIA_PERF_OPEN' });
-    if (hash) {
-      perfMark('perf:auto-open', { hash });
-      open(hash);
-    } else {
-      perfMark('perf:auto-open-none');
-    }
-  } catch (e) {
-    perfMark('perf:auto-open-error', { error: String(e) });
-  }
-};
+type RenderComponent =
+  | 'Reader'
+  | 'ReaderContent'
+  | 'BooksGrid'
+  | 'FoliateViewer'
+  | 'Annotator'
+  | 'HeaderBar'
+  | 'FooterBar'
+  | 'ChatPanel'
+  | 'ChatHistory';
 
 declare global {
+  var __MARGINALIA_PERF: boolean | undefined;
+  var __MARGINALIA_PERF_OPEN: string | undefined;
   var __perfMark: typeof perfMark | undefined;
 }
 
-if (typeof globalThis !== 'undefined') {
+const enabled = globalThis.__MARGINALIA_PERF === true;
+const noop = () => {};
+let remaining = 10000;
+const renders = new Map<RenderComponent, number>();
+let hoverPending = false;
+let hoverSamples = 0;
+
+export const perfMark = (name: string, extra?: Record<string, unknown>): void => {
+  if (!enabled || remaining === 0) return;
+  remaining -= 1;
+  const line = `[perf] ${name} ${JSON.stringify({ ...extra, t: Math.round(performance.now()) })}`;
+  console.info(line);
+  if (remaining === 0) console.info('[perf] perf:trace-limit {}');
+};
+
+export const perfSpan = (
+  name: string,
+  extra?: Record<string, unknown>,
+): ((more?: Record<string, unknown>) => void) => {
+  if (!enabled || remaining === 0) return noop;
+  const start = performance.now();
+  return (more) => perfMark(name, { ...extra, ...more, dur: Math.round(performance.now() - start) });
+};
+
+export const perfRender = (component: RenderComponent): void => {
+  if (enabled && remaining > 0) renders.set(component, (renders.get(component) ?? 0) + 1);
+};
+
+export const perfHoverFrame = (bar: 'header' | 'footer'): void => {
+  if (!enabled || remaining === 0 || hoverPending || hoverSamples >= 300) return;
+  hoverPending = true;
+  hoverSamples += 1;
+  const end = perfSpan('hover:next-frame-proxy', { bar });
+  requestAnimationFrame(() => {
+    hoverPending = false;
+    end();
+  });
+};
+
+export const perfAutoOpen = async (open: (hash: string) => void): Promise<void> => {
+  const hash = globalThis.__MARGINALIA_PERF_OPEN;
+  if (hash) {
+    perfMark('perf:auto-open', { hash });
+    open(hash);
+  }
+};
+
+if (enabled) {
   globalThis.__perfMark = perfMark;
+  perfMark('perf:enabled', { timeOrigin: performance.timeOrigin, traceLimit: remaining });
+  let lastTick = performance.now();
+  let lastFlush = lastTick;
+  let driftCount = 0;
+  let maxDrift = 0;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    const drift = now - lastTick - 100;
+    lastTick = now;
+    if (document.visibilityState === 'visible' && drift > 50) {
+      driftCount += 1;
+      maxDrift = Math.max(maxDrift, drift);
+    }
+    if (now - lastFlush >= 1000) {
+      perfMark('react:render-attempts', {
+        windowMs: Math.round(now - lastFlush),
+        counts: Object.fromEntries(renders),
+      });
+      if (driftCount) {
+        perfMark('main-thread:timer-drift', { count: driftCount, maxMs: Math.round(maxDrift) });
+      }
+      renders.clear();
+      driftCount = 0;
+      maxDrift = 0;
+      lastFlush = now;
+    }
+    if (remaining === 0) clearInterval(timer);
+  }, 100);
 }

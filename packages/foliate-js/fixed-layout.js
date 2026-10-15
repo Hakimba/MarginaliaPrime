@@ -34,7 +34,10 @@ const getViewport = (doc, viewport) => {
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow']
     #root = this.attachShadow({ mode: 'open' })
-    #observer = new ResizeObserver(() => this.#render())
+    #observer = new ResizeObserver(() => {
+        globalThis.__perfMark?.('pdf:layout-resize', { reason: 'resize' })
+        this.#render()
+    })
     #spreads
     #index = -1
     defaultViewport
@@ -61,6 +64,8 @@ export class FixedLayout extends HTMLElement {
     #activePreloads = 0
     #layoutGeneration = 0
     #navigationId = 0
+    #loadedSpreadIndex = -1
+    #spreadRender
     // Scroll mode fields
     #scrollMode = false
     #scrollPages = []
@@ -194,7 +199,15 @@ export class FixedLayout extends HTMLElement {
             }
         })
     }
-    #render(side = this.#side) {
+    #render() {
+        if (this.#scrollMode) {
+            this.#renderScrollMode()
+            return
+        }
+        if (this.#loadedSpreadIndex !== this.#index) return
+        void this.#finishSpread({ spreadIndex: this.#index, navigationId: this.#navigationId })
+    }
+    #layout(side = this.#side) {
         if (this.#scrollMode) {
             this.#renderScrollMode()
             return []
@@ -235,10 +248,6 @@ export class FixedLayout extends HTMLElement {
         const transform = ({frame, styles}) => {
             let { element, iframe, width, height, blank, onZoom } = frame
             if (!iframe) return
-            if (onZoom) {
-                const p = onZoom({ doc: frame.iframe.contentDocument, scale })
-                if (p?.then) renderPromises.push(p)
-            }
             const iframeScale = onZoom ? scale : 1
             const zoomedOut = this.#scaleFactor < 1.0
             Object.assign(iframe.style, {
@@ -262,6 +271,14 @@ export class FixedLayout extends HTMLElement {
                 element.style.display = 'none'
             }
 
+            if (onZoom && !(portrait && frame !== target)) {
+                globalThis.__perfMark?.('pdf:onZoom', {
+                    page: Number(iframe.dataset.sectionIndex) + 1,
+                    reason: 'visible-render', scale, dpr: devicePixelRatio,
+                })
+                const p = onZoom({ doc: frame.iframe.contentDocument, scale })
+                if (p?.then) renderPromises.push(p)
+            }
             // position and redraw overlayer to match the scaled iframe
             const sectionIndex = iframe.dataset.sectionIndex != null
                 ? parseInt(iframe.dataset.sectionIndex) : undefined
@@ -310,6 +327,8 @@ export class FixedLayout extends HTMLElement {
         return renderPromises
     }
     async #showSpread({ left, right, center, spreadIndex, navigationId }) {
+        const perfStart = globalThis.__perfMark ? performance.now() : 0
+        globalThis.__perfMark?.('pdf:spread-start', { spreadIndex, navigationId })
         let frames
         const cacheKey = spreadIndex !== undefined ? `spread-${spreadIndex}` : null
         const prerendered = cacheKey ? this.#prerenderedSpreads.get(cacheKey) : null
@@ -332,6 +351,8 @@ export class FixedLayout extends HTMLElement {
                 this.#spreadAccessTime.set(cacheKey, Date.now())
             }
         }
+        if (navigationId !== this.#navigationId) return false
+        this.#loadedSpreadIndex = spreadIndex
         this.#left = frames.left ?? null
         this.#right = frames.right ?? null
         this.#center = frames.center ?? null
@@ -351,18 +372,29 @@ export class FixedLayout extends HTMLElement {
             })
         })
 
+        return this.#finishSpread({ spreadIndex, navigationId, perfStart })
+    }
+    #finishSpread(options) {
+        const renderPromises = this.#layout()
+        const request = { promise: null }
+        this.#spreadRender = request
+        request.promise = this.#completeSpread(request, renderPromises, options)
+        return request.promise
+    }
+    async #completeSpread(request, renderPromises, { spreadIndex, navigationId, perfStart = globalThis.__perfMark ? performance.now() : 0 }) {
         // Render layout and await any async onZoom callbacks (e.g. PDF text
         // layer rendering) so the document is fully populated before overlayers
         // try to resolve CFIs against it.
-        const renderPromises = this.#render()
-        if (renderPromises.length) await Promise.all(renderPromises)
-        if (navigationId !== this.#navigationId) return
+        const outcomes = await Promise.all(renderPromises)
+        if (navigationId !== this.#navigationId) return false
+        if (request !== this.#spreadRender) return this.#spreadRender.promise
+        if (outcomes.some(outcome => outcome?.kind && outcome.kind !== 'ready')) return false
 
-        const showingFrames = center
+        const showingFrames = (this.#center
             ? [this.#center]
-            : [this.#left, this.#right]
+            : [this.#left, this.#right])
+            .filter(frame => frame?.iframe && frame.element.style.display !== 'none')
         for (const frame of showingFrames) {
-            if (!frame?.iframe) continue
             const index = frame.iframe.dataset.sectionIndex != null
                 ? parseInt(frame.iframe.dataset.sectionIndex) : undefined
             if (index != null && !this.#overlayers.has(index)) {
@@ -380,6 +412,14 @@ export class FixedLayout extends HTMLElement {
                 }
             }
         }
+        if (navigationId === this.#navigationId) {
+            globalThis.__perfMark?.('pdf:spread-ready', {
+                spreadIndex, navigationId, dur: performance.now() - perfStart,
+                pages: showingFrames.map(frame => Number(frame.iframe.dataset.sectionIndex) + 1),
+                renders: showingFrames.map(frame => frame.iframe.contentDocument?.__marginaliaPerfRender),
+            })
+        }
+        return true
     }
     #initScrollMode(targetIndex = 0) {
         const currentIndex = targetIndex
@@ -402,7 +442,7 @@ export class FixedLayout extends HTMLElement {
             el.className = 'scroll-page'
             el.dataset.index = i
             this.#scrollContainer.append(el)
-            return { el, index: i, section, state: 'idle', frame: null, vpWidth: vw, vpHeight: vh }
+            return { el, index: i, section, state: 'idle', frame: null, render: null, vpWidth: vw, vpHeight: vh }
         })
 
         this.#renderScrollMode()
@@ -527,7 +567,7 @@ export class FixedLayout extends HTMLElement {
         if (!src) return { blank: true, element, iframe }
         return new Promise(resolve => {
             iframe.addEventListener('load', () => {
-                globalThis.__perfMark?.('pdf:frame-load', { index })
+                globalThis.__perfMark?.('pdf:frame-load', { index: pageData.index })
                 const doc = iframe.contentDocument
                 iframe.dataset.sectionIndex = pageData.index
                 this.dispatchEvent(new CustomEvent('load', { detail: { doc, index: pageData.index } }))
@@ -578,20 +618,8 @@ export class FixedLayout extends HTMLElement {
                 pageData.vpWidth = frame.width
                 pageData.vpHeight = frame.height
             }
-            this.#renderScrollPage(pageData)
-
-            // Create overlayer
             const doc = frame.iframe.contentDocument
             if (doc) {
-                this.dispatchEvent(new CustomEvent('create-overlayer', {
-                    detail: {
-                        doc, index: pageData.index,
-                        attach: overlayer => {
-                            this.#overlayers.set(pageData.index, overlayer)
-                            frame.element.append(overlayer.element)
-                        },
-                    },
-                }))
                 // Forward wheel events to host when iframe has pointer-events
                 // (fallback for the brief window after scroll settles)
                 doc.addEventListener('wheel', e => {
@@ -601,9 +629,12 @@ export class FixedLayout extends HTMLElement {
                     this.scrollBy({ top: e.deltaY, left: e.deltaX, behavior: 'instant' })
                 }, { passive: true })
             }
+            await this.#renderScrollPage(pageData)
         } catch (e) {
             console.warn('Failed to load scroll page', pageData.index, e)
-            pageData.state = 'idle'
+            if (this.#scrollLoadGen.get(pageData.index) === gen && this.#scrollMode) {
+                this.#teardownScrollPage(pageData)
+            }
         }
     }
     // Remove a loaded scroll page's frame and overlayer
@@ -618,6 +649,7 @@ export class FixedLayout extends HTMLElement {
             pageData.frame.element?.remove()
         }
         pageData.frame = null
+        pageData.render = null
         pageData.state = 'idle'
     }
     // Evict the farthest loaded pages when over limit
@@ -641,7 +673,7 @@ export class FixedLayout extends HTMLElement {
             page.el.style.width = `${page.vpWidth * scale}px`
             page.el.style.height = `${page.vpHeight * scale}px`
             if (page.state === 'loaded' && page.frame) {
-                this.#renderScrollPage(page)
+                void this.#renderScrollPage(page)
             }
         }
         // Restore scroll position to keep current page in view after resize
@@ -657,7 +689,6 @@ export class FixedLayout extends HTMLElement {
         const scale = (hostWidth / vw) * this.#scaleFactor
 
         if (frame.onZoom) {
-            frame.onZoom({ doc: frame.iframe.contentDocument, scale })
             Object.assign(frame.iframe.style, {
                 width: `${vw * scale}px`,
                 height: `${vh * scale}px`,
@@ -681,16 +712,63 @@ export class FixedLayout extends HTMLElement {
         pageData.el.style.width = `${vw * scale}px`
         pageData.el.style.height = `${vh * scale}px`
 
-        const overlayer = this.#overlayers.get(pageData.index)
-        if (overlayer) {
-            Object.assign(overlayer.element.style, {
-                position: 'absolute',
-                top: '0',
-                left: '0',
-                width: `${vw * scale}px`,
-                height: `${vh * scale}px`,
-            })
-            overlayer.redraw()
+        const request = { promise: null }
+        pageData.render = request
+        request.promise = this.#completeScrollRender(pageData, frame, request, scale)
+        return request.promise
+    }
+    async #completeScrollRender(pageData, frame, request, scale) {
+        try {
+            let outcome
+            if (frame.onZoom) {
+                globalThis.__perfMark?.('pdf:onZoom', {
+                    page: pageData.index + 1, reason: 'scroll', scale, dpr: devicePixelRatio,
+                })
+                outcome = await frame.onZoom({ doc: frame.iframe.contentDocument, scale })
+            }
+            if (request !== pageData.render) return pageData.render?.promise ?? false
+            if (!this.#scrollMode || !this.isConnected || pageData.frame !== frame) {
+                if (!this.isConnected && pageData.frame === frame) this.#teardownScrollPage(pageData)
+                return false
+            }
+            if (outcome?.kind && outcome.kind !== 'ready') {
+                this.#teardownScrollPage(pageData)
+                return false
+            }
+
+            const overlayer = this.#overlayers.get(pageData.index)
+            if (overlayer) {
+                Object.assign(overlayer.element.style, {
+                    position: 'absolute',
+                    top: '0',
+                    left: '0',
+                    width: `${pageData.vpWidth * scale}px`,
+                    height: `${pageData.vpHeight * scale}px`,
+                })
+                overlayer.redraw()
+            } else {
+                const doc = frame.iframe.contentDocument
+                if (doc) this.dispatchEvent(new CustomEvent('create-overlayer', {
+                    detail: {
+                        doc, index: pageData.index,
+                        attach: overlayer => {
+                            if (pageData.render !== request || !this.#scrollMode
+                                || !this.isConnected
+                                || pageData.frame !== frame) return
+                            this.#overlayers.set(pageData.index, overlayer)
+                            frame.element.append(overlayer.element)
+                        },
+                    },
+                }))
+            }
+            return true
+        } catch (e) {
+            console.warn('Failed to render scroll page', pageData.index, e)
+            if (request !== pageData.render) return pageData.render?.promise ?? false
+            if (this.#scrollMode && pageData.frame === frame) {
+                this.#teardownScrollPage(pageData)
+            }
+            return false
         }
     }
     #getScrollIndex() {
@@ -716,22 +794,11 @@ export class FixedLayout extends HTMLElement {
         this.dispatchEvent(new CustomEvent('relocate', { detail:
             { reason: 'scroll', range: null, index, fraction: 0, size: 1 } }))
     }
-    #goLeft() {
-        if (this.#center || this.#left?.blank) return
-        if (this.#portrait && this.#left?.element?.style?.display === 'none') {
-            this.#side = 'left'
-            this.#render()
-            this.#reportLocation('page')
-            return true
-        }
-    }
-    #goRight() {
-        if (this.#center || this.#right?.blank) return
-        if (this.#portrait && this.#right?.element?.style?.display === 'none') {
-            this.#side = 'right'
-            this.#render()
-            this.#reportLocation('page')
-            return true
+    #goSide(side) {
+        const frame = side === 'left' ? this.#left : this.#right
+        if (!this.#center && !frame?.blank && this.#portrait
+            && frame?.element?.style.display === 'none') {
+            return this.goToSpread(this.#index, side, 'page')
         }
     }
     open(book) {
@@ -802,6 +869,7 @@ export class FixedLayout extends HTMLElement {
             }
         }
         this.#prerenderedSpreads.clear()
+        this.#loadedSpreadIndex = -1
         this.#spreadAccessTime.clear()
         if (!this.#scrollMode) this.#overlayers.clear()
         // Scrolled pages are independent of spreads. Apply the new grouping on
@@ -861,33 +929,36 @@ export class FixedLayout extends HTMLElement {
         // Record the target before any load awaits: another mode change may
         // happen while frames are still loading.
         this.#side = side
-        if (index === this.#index) {
-            this.#render()
-            this.#reportLocation(reason)
+        const navigationId = ++this.#navigationId
+        if (index === this.#index && index === this.#loadedSpreadIndex) {
+            if (await this.#finishSpread({ spreadIndex: index, navigationId })
+                && navigationId === this.#navigationId)
+                this.#reportLocation(reason)
             return
         }
-        const navigationId = ++this.#navigationId
+        globalThis.__perfMark?.('pdf:navigation-start', { navigationId, spreadIndex: index })
         this.#index = index
         const spread = this.#spreads[index]
         const cacheKey = `spread-${index}`
         const cached = this.#preloadCache.get(cacheKey)
+        let ready
         if (cached && cached !== 'loading') {
             if (cached.center) {
                 const sectionIndex = this.book.sections.indexOf(spread.center)
-                await this.#showSpread({ center: { index: sectionIndex, src: cached.center }, spreadIndex: index, side, navigationId })
+                ready = await this.#showSpread({ center: { index: sectionIndex, src: cached.center }, spreadIndex: index, side, navigationId })
             } else {
                 const indexL = this.book.sections.indexOf(spread.left)
                 const indexR = this.book.sections.indexOf(spread.right)
                 const left = { index: indexL, src: cached.left }
                 const right = { index: indexR, src: cached.right }
-                await this.#showSpread({ left, right, side, spreadIndex: index, navigationId })
+                ready = await this.#showSpread({ left, right, side, spreadIndex: index, navigationId })
             }
         } else {
             if (spread.center) {
                 const sectionIndex = this.book.sections.indexOf(spread.center)
                 const src = await spread.center?.load?.()
                 if (navigationId !== this.#navigationId) return
-                await this.#showSpread({ center: { index: sectionIndex, src }, spreadIndex: index, side, navigationId })
+                ready = await this.#showSpread({ center: { index: sectionIndex, src }, spreadIndex: index, side, navigationId })
             } else {
                 const indexL = this.book.sections.indexOf(spread.left)
                 const indexR = this.book.sections.indexOf(spread.right)
@@ -896,11 +967,11 @@ export class FixedLayout extends HTMLElement {
                 if (navigationId !== this.#navigationId) return
                 const left = { index: indexL, src: srcL }
                 const right = { index: indexR, src: srcR }
-                await this.#showSpread({ left, right, side, spreadIndex: index, navigationId })
+                ready = await this.#showSpread({ left, right, side, spreadIndex: index, navigationId })
             }
         }
 
-        if (navigationId !== this.#navigationId) return
+        if (!ready || navigationId !== this.#navigationId) return
         this.#reportLocation(reason)
         this.#preloadNextSpreads()
     }
@@ -961,8 +1032,17 @@ export class FixedLayout extends HTMLElement {
                         this.#prerenderedSpreads.set(cacheKey, { center: frame })
                         this.#spreadAccessTime.set(cacheKey, Date.now())
                         if (frame.onZoom) {
+                            Object.assign(frame.iframe.style, {
+                                display: 'block',
+                                width: `${frame.width * this.#totalScaleFactor}px`,
+                                height: `${frame.height * this.#totalScaleFactor}px`,
+                            })
                             const doc = frame.iframe.contentDocument
-                            frame.onZoom({ doc, scale: this.#totalScaleFactor })
+                            globalThis.__perfMark?.('pdf:onZoom', {
+                                page: sectionIndex + 1, reason: 'preload',
+                                scale: this.#totalScaleFactor, dpr: devicePixelRatio,
+                            })
+                            await frame.onZoom({ doc, scale: this.#totalScaleFactor })
                         }
                     } else {
                         const srcL = await spread.left?.load?.()
@@ -984,12 +1064,30 @@ export class FixedLayout extends HTMLElement {
                         this.#spreadAccessTime.set(cacheKey, Date.now())
 
                         if (leftFrame.onZoom) {
+                            Object.assign(leftFrame.iframe.style, {
+                                display: 'block',
+                                width: `${leftFrame.width * this.#totalScaleFactor}px`,
+                                height: `${leftFrame.height * this.#totalScaleFactor}px`,
+                            })
                             const docL = leftFrame.iframe.contentDocument
-                            leftFrame.onZoom({ doc: docL, scale: this.#totalScaleFactor })
+                            globalThis.__perfMark?.('pdf:onZoom', {
+                                page: indexL + 1, reason: 'preload',
+                                scale: this.#totalScaleFactor, dpr: devicePixelRatio,
+                            })
+                            await leftFrame.onZoom({ doc: docL, scale: this.#totalScaleFactor })
                         }
                         if (rightFrame.onZoom) {
+                            Object.assign(rightFrame.iframe.style, {
+                                display: 'block',
+                                width: `${rightFrame.width * this.#totalScaleFactor}px`,
+                                height: `${rightFrame.height * this.#totalScaleFactor}px`,
+                            })
                             const docR = rightFrame.iframe.contentDocument
-                            rightFrame.onZoom({ doc: docR, scale: this.#totalScaleFactor })
+                            globalThis.__perfMark?.('pdf:onZoom', {
+                                page: indexR + 1, reason: 'preload',
+                                scale: this.#totalScaleFactor, dpr: devicePixelRatio,
+                            })
+                            await rightFrame.onZoom({ doc: docR, scale: this.#totalScaleFactor })
                         }
                     }
                 } catch {
@@ -1072,16 +1170,18 @@ export class FixedLayout extends HTMLElement {
             this.scrollBy({ top: distance || this.clientHeight, behavior: 'smooth' })
             return
         }
-        const s = this.rtl ? this.#goLeft() : this.#goRight()
-        if (!s) return this.goToSpread(this.#index + 1, this.rtl ? 'right' : 'left', 'page')
+        const s = this.#goSide(this.rtl ? 'left' : 'right')
+        if (s) return s
+        return this.goToSpread(this.#index + 1, this.rtl ? 'right' : 'left', 'page')
     }
     async prev(distance) {
         if (this.#scrollMode) {
             this.scrollBy({ top: -(distance || this.clientHeight), behavior: 'smooth' })
             return
         }
-        const s = this.rtl ? this.#goRight() : this.#goLeft()
-        if (!s) return this.goToSpread(this.#index - 1, this.rtl ? 'left' : 'right', 'page')
+        const s = this.#goSide(this.rtl ? 'right' : 'left')
+        if (s) return s
+        return this.goToSpread(this.#index - 1, this.rtl ? 'left' : 'right', 'page')
     }
     nextSection() {
         if (!this.#scrollMode) return
@@ -1220,6 +1320,7 @@ export class FixedLayout extends HTMLElement {
             }
         }
         this.#prerenderedSpreads.clear()
+        this.#loadedSpreadIndex = -1
         this.#preloadCache.clear()
         this.#spreadAccessTime.clear()
         this.#overlayers.clear()

@@ -1,3 +1,4 @@
+import { perfRender, perfHoverFrame } from '@/utils/perf';
 import clsx from 'clsx';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { PiDotsThreeVerticalBold } from 'react-icons/pi';
@@ -52,6 +53,7 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
   onGoToLibrary,
   onDropdownOpenChange,
 }) => {
+  perfRender('HeaderBar');
   const _ = useTranslation();
   const { envConfig, appService } = useEnv();
   const { settings } = useSettingsStore();
@@ -152,7 +154,12 @@ const HeaderBar: React.FC<HeaderBarProps> = ({
         role='none'
         className={clsx('absolute top-0 z-10 h-11 w-full', pointerInDoc && 'pointer-events-none')}
         onClick={() => setHoveredBookKey(bookKey)}
-        onMouseEnter={() => !appService?.isMobile && setHoveredBookKey(bookKey)}
+        onMouseEnter={() => {
+          if (!appService?.isMobile) {
+            perfHoverFrame('header');
+            setHoveredBookKey(bookKey);
+          }
+        }}
         onTouchStart={() => !appService?.isMobile && setHoveredBookKey(bookKey)}
       />
       <div

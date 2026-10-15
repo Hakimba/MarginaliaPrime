@@ -1,3 +1,4 @@
+import { perfRender, perfHoverFrame } from '@/utils/perf';
 import clsx from 'clsx';
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useEnv } from '@/context/EnvContext';
@@ -21,6 +22,7 @@ const FooterBar: React.FC<FooterBarProps> = ({
   isHoveredAnim,
   gridInsets,
 }) => {
+  perfRender('FooterBar');
   const _ = useTranslation();
   const { appService } = useEnv();
   const { getConfig, setConfig, getBookData } = useBookDataStore();
@@ -210,7 +212,12 @@ const FooterBar: React.FC<FooterBarProps> = ({
           needHorizontalScroll && 'sm:!bottom-3 sm:!h-7',
           isMobile || pointerInDoc ? 'pointer-events-none' : '',
         )}
-        onMouseEnter={() => !isMobile && setHoveredBookKey(bookKey)}
+        onMouseEnter={() => {
+          if (!isMobile) {
+            perfHoverFrame('footer');
+            setHoveredBookKey(bookKey);
+          }
+        }}
         onTouchStart={() => !isMobile && setHoveredBookKey(bookKey)}
       />
 
