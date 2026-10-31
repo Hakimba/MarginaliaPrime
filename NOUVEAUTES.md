@@ -21,6 +21,20 @@ il consomme le quota de l'abonnement. Si le binaire `claude` n'est pas dans le `
 
 ---
 
+## Un glossaire par livre
+
+*(PR #18)*
+
+- **Un onglet Glossaire dans la barre latérale**, propre à chaque livre et gardé sur ta machine :
+  chaque entrée a son terme, sa formule rendue, son explication et un lien vers la page de sa
+  définition. Tu peux en ajouter à la main.
+- **Claude y note les termes qu'il t'explique**, et s'en souvient dans une autre conversation sur le
+  même livre : il donne alors un rappel bref avec un lien vers l'entrée.
+- **L'anti-spoiler s'applique au glossaire** : Claude ne relit pas une explication tirée d'une page
+  que tu n'as pas encore lue. Toi, tu vois toujours toutes tes notes.
+- **Rien ne se perd** : deux ajouts simultanés sont tous les deux gardés, un même terme à la même
+  page est mis à jour, et un fichier abîmé n'est jamais effacé.
+
 ## Pas de spoiler
 
 *(PR #16)*
@@ -255,7 +269,6 @@ il consomme le quota de l'abonnement. Si le binaire `claude` n'est pas dans le `
 
 ## Ce qui n'est pas encore fait
 
-- Un glossaire des termes expliqués, retenu d'une conversation à l'autre.
 - Des tutoriels d'utilisation ; en attendant, `FONCTIONNEMENT.md` décrit le comportement de chaque
   fonction, situation par situation.
 

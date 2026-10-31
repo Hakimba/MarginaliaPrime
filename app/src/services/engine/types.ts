@@ -55,6 +55,8 @@ export interface EngineContext {
   /** e.g. "30 / 417" or a chapter-relative position. */
   position?: string;
   selections: EngineSelection[];
+  /** Visible glossary names refreshed before each turn, across conversations. */
+  glossaryTerms?: string[];
 }
 
 export type EngineEvent =

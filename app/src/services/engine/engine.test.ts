@@ -199,11 +199,11 @@ describe('buildCliArgs', () => {
     const tools = buildCliArgs(startOptions({ readerTools: true }));
     expect(tools[tools.indexOf('--tools') + 1]).toBe('');
     expect(tools[tools.indexOf('--allowedTools') + 1]).toBe(
-      'mcp__reader__search_book,mcp__reader__get_pages,mcp__reader__get_toc',
+      'mcp__reader__search_book,mcp__reader__get_pages,mcp__reader__get_toc,mcp__reader__get_glossary,mcp__reader__add_to_glossary',
     );
     const both = buildCliArgs(startOptions({ readerTools: true, webSearch: true }));
     expect(both[both.indexOf('--allowedTools') + 1]).toBe(
-      'WebSearch,mcp__reader__search_book,mcp__reader__get_pages,mcp__reader__get_toc',
+      'WebSearch,mcp__reader__search_book,mcp__reader__get_pages,mcp__reader__get_toc,mcp__reader__get_glossary,mcp__reader__add_to_glossary',
     );
   });
 

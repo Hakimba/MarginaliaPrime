@@ -78,6 +78,8 @@ ce qui est, pas ce qui a changé.
   **EPUB** : le chapitre en cours.
 - **La liste des notations du livre**, s'il en a une (une annexe « Notation », « Symbols »…), au
   premier message de la conversation.
+- **Les noms des termes de ton glossaire**, actualisés avant chaque question. Les entrées situées
+  au-delà des pages autorisées par l'anti-spoiler restent masquées pour Claude.
 - **La ligne au-dessus de la saisie** dit tout cela : « p. 208 / 417 · 6.5 … · p. 203–213 jointes »,
   puis « pages déjà transmises ». Pendant la construction de l'index : « index du livre 40 % ».
 
@@ -144,7 +146,31 @@ ce qui est, pas ce qui a changé.
   message : la vue reste à ta position. Reviens en bas ou envoie une nouvelle question pour
   reprendre le suivi.
 
-## 8. Limites connues
+## 8. Le glossaire
+
+- **L'onglet Glossaire**, dans la barre latérale gauche, montre les termes du livre. Tu peux le
+  consulter sans ouvrir le chat. Chaque livre conserve son propre glossaire, même après fermeture.
+- **Claude explique un terme du livre** : il a pour consigne d'enregistrer une explication courte,
+  sa notation LaTeX et la page du passage expliqué. Une définition envoyée par **Ask AI** est aussi
+  concernée, sans demander de mémoriser. Quand l'outil confirme l'ajout, le panneau s'actualise.
+  Si la page est inconnue, il n'invente pas d'entrée. Un échec d'enregistrement reste signalé.
+- **Tu redemandes un terme déjà enregistré**, même dans une nouvelle conversation : Claude a pour
+  consigne de consulter l'entrée, de donner un rappel bref et d'ajouter un lien vers le glossaire.
+  Cliquer sur ce lien ouvre le panneau et place le terme sous tes yeux.
+- **« Ajouter un terme »** ouvre un formulaire. Renseigne le terme, une explication et la page du
+  PDF ou la section de l'EPUB. Le LaTeX est facultatif, sans délimiteurs `$`. L'ajout est local et
+  n'appelle pas Claude. Si l'enregistrement échoue, ton brouillon reste dans le formulaire.
+- **Le même terme à la même page** met à jour l'entrée. À une autre page, il conserve une entrée
+  distincte, pour les symboles qui changent de sens au fil du livre. La casse est conservée.
+- **Cliquer sur « p. N » ou « section N »** sous une entrée ouvre le passage de référence dans le livre.
+- **Tes notes restent visibles pour toi**, y compris celles d'une lecture plus avancée. Claude
+  reçoit uniquement celles que les permissions de lecture lui autorisent à consulter.
+- **Tu envoies un passage situé après la limite de lecture** : Claude peut enregistrer l'explication
+  de cette sélection déjà fournie. Cela ne lui ouvre aucune autre page ni les notes masquées.
+- **Un glossaire illisible** affiche une erreur et un bouton « Réessayer ». Le fichier existant
+  reste intact. Le chat reste utilisable si cette mémoire ne peut pas être actualisée.
+
+## 9. Limites connues
 
 - Un PDF dont le texte est très mal balisé (TAPL) donne un texte extrait mélangé : l'image fait foi
   pour les passages ; la recherche dans le livre peut rater une expression.

@@ -5,12 +5,14 @@ import { BookDoc } from '@/libs/document';
 import { useReaderStore } from '@/store/readerStore';
 import { useSidebarStore } from '@/store/sidebarStore';
 import { useBookDataStore } from '@/store/bookDataStore';
+import { useGlossaryStore } from '@/store/glossaryStore';
 import { OverlayScrollbarsComponent } from 'overlayscrollbars-react';
 import 'overlayscrollbars/overlayscrollbars.css';
 
 import TOCView from './TOCView';
 import BooknoteView from './BooknoteView';
 import TabNavigation from './TabNavigation';
+import GlossaryView from './GlossaryView';
 
 const SidebarContent: React.FC<{
   bookDoc: BookDoc;
@@ -20,16 +22,30 @@ const SidebarContent: React.FC<{
   const { setSideBarVisible } = useSidebarStore();
   const { getConfig, setConfig } = useBookDataStore();
   const config = getConfig(sideBarBookKey);
+  const glossaryFocus = useGlossaryStore((s) => s.focusRequest);
   const [activeTab, setActiveTab] = useState(config?.viewSettings?.sideBarTab || 'toc');
   const [fade, setFade] = useState(false);
   const [targetTab, setTargetTab] = useState(activeTab);
   const isMobile = window.innerWidth < 640 || window.innerHeight < 640;
   useEffect(() => {
     if (!sideBarBookKey) return;
-    const config = getConfig(sideBarBookKey!)!;
-    setActiveTab(config.viewSettings!.sideBarTab!);
+    const tab = getConfig(sideBarBookKey)?.viewSettings?.sideBarTab ?? 'toc';
+    setActiveTab(tab);
+    setTargetTab(tab);
+    setFade(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sideBarBookKey]);
+
+  useEffect(() => {
+    if (glossaryFocus?.hash !== sideBarBookKey.split('-')[0]) return;
+    setActiveTab('glossary');
+    setTargetTab('glossary');
+    setFade(false);
+    const config = useBookDataStore.getState().getConfig(sideBarBookKey);
+    if (config) useBookDataStore.getState().setConfig(sideBarBookKey, {
+      viewSettings: { ...config.viewSettings, sideBarTab: 'glossary' },
+    });
+  }, [glossaryFocus, sideBarBookKey]);
 
   const handleTabChange = (tab: string) => {
     setFade(true);
@@ -83,6 +99,9 @@ const SidebarContent: React.FC<{
               )}
               {targetTab === 'bookmarks' && (
                 <BooknoteView type='bookmark' toc={bookDoc.toc ?? []} bookKey={sideBarBookKey} />
+              )}
+              {targetTab === 'glossary' && (
+                <GlossaryView key={sideBarBookKey} bookDoc={bookDoc} bookKey={sideBarBookKey} />
               )}
             </div>
           </OverlayScrollbarsComponent>

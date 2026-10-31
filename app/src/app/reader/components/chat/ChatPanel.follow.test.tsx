@@ -5,6 +5,8 @@ import type { Engine, EngineEvent, EngineStartInfo } from '@/services/engine';
 import type { ChatMessage, ConversationMeta } from '@/services/chat/persistence';
 import { useChatStore } from '@/store/chatStore';
 import { useSidebarStore } from '@/store/sidebarStore';
+import { useGlossaryStore } from '@/store/glossaryStore';
+import type { GlossaryEntry } from '@/services/glossary';
 import ChatPanel from './ChatPanel';
 
 const boundary = vi.hoisted(() => ({
@@ -13,6 +15,13 @@ const boundary = vi.hoisted(() => ({
   loadGate: Promise.resolve(),
   transcripts: new Map<string, ChatMessage[]>(),
   send: vi.fn<Engine['send']>().mockResolvedValue(undefined),
+  glossary: vi.fn<(hash: string) => Promise<GlossaryEntry[]>>().mockResolvedValue([]),
+  resumeSession: undefined as string | undefined,
+}));
+
+vi.mock('@/services/glossary', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/services/glossary')>(),
+  loadGlossary: boundary.glossary,
 }));
 
 vi.mock('@/services/engine/claudeCliEngine', () => ({
@@ -40,7 +49,7 @@ vi.mock('@/services/engine/claudeCliEngine', () => ({
 
 vi.mock('@/services/chat/persistence', () => ({
   loadConversationIndex: async (): Promise<ConversationMeta[]> => [
-    { id: 'recent', name: 'Recent', createdAt: 1, lastMessageAt: 20, messageCount: 6 },
+    { id: 'recent', name: 'Recent', createdAt: 1, lastMessageAt: 20, messageCount: 6, engineSessionId: boundary.resumeSession },
     { id: 'older', name: 'Older', createdAt: 1, lastMessageAt: 10, messageCount: 6 },
   ],
   loadMessages: async (hash: string, id: string) => {
@@ -133,6 +142,9 @@ beforeEach(async () => {
   vi.useFakeTimers();
   boundary.listeners.clear();
   boundary.send.mockClear();
+  boundary.glossary.mockReset().mockResolvedValue([]);
+  boundary.resumeSession = undefined;
+  useGlossaryStore.setState({ books: {}, focusRequest: null });
   boundary.startGate = Promise.resolve();
   boundary.loadGate = Promise.resolve();
   boundary.transcripts.clear();
@@ -162,6 +174,78 @@ afterEach(async () => {
 });
 
 describe('ChatPanel transcript following', () => {
+  it('keeps the turn busy while recovering an expired CLI session', async () => {
+    boundary.resumeSession = 'expired-session';
+    await act(async () => useSidebarStore.getState().setSideBarBookKey('next-view'));
+    await ask('A question to recover');
+    let resumeStartup = () => {};
+    boundary.startGate = new Promise<void>((resolve) => { resumeStartup = resolve; });
+    await emit({ kind: 'error', message: 'Session not found', fatal: true });
+    await ask('Must wait for the recovered answer');
+    expect(boundary.send).toHaveBeenCalledTimes(1);
+    await act(async () => resumeStartup());
+    expect(boundary.send).toHaveBeenCalledTimes(2);
+    await ask('Still busy');
+    expect(boundary.send).toHaveBeenCalledTimes(2);
+    await emit({ kind: 'done', text: 'Recovered answer.' });
+    await ask('Now available');
+    expect(boundary.send).toHaveBeenCalledTimes(3);
+  });
+
+  it('can send again after a streaming conversation is replaced', async () => {
+    await ask('Old question');
+    await emit({ kind: 'text', text: 'Interrupted answer' });
+    const previousListeners = Array.from(boundary.listeners);
+    await act(async () => useChatStore.getState().updateReading('book', { allowedWindow: [20, 21] }));
+    const newConversation = host.querySelector('button[title="Nouvelle conversation"]');
+    if (!(newConversation instanceof HTMLButtonElement)) throw new Error('Missing new conversation button');
+    await act(async () => newConversation.click());
+    expect(useChatStore.getState().readings['book']?.allowedWindow).toBeNull();
+    await ask('New question');
+    expect(boundary.send).toHaveBeenCalledTimes(2);
+    await emit({ kind: 'text', text: 'New answer' });
+    expect(bubbleTexts()).toEqual(['New question', 'New answer']);
+    for (const previous of previousListeners) expect(boundary.listeners.has(previous)).toBe(false);
+  });
+
+  it('refreshes memory after a matched tool result and recalls it in another conversation', async () => {
+    const entry: GlossaryEntry = { term: '⊤', latex: '\\top', explanation: 'Le type sommet.', page: 2, date: 1 };
+    await ask('Que signifie ⊤ ?');
+    expect(boundary.send.mock.calls.at(-1)?.[1].glossaryTerms).toEqual([]);
+    const loads = boundary.glossary.mock.calls.length;
+    await emit({ kind: 'tool_use', id: 'add', name: 'mcp__reader__add_to_glossary' });
+    await emit({ kind: 'tool_use', id: 'search', name: 'mcp__reader__search_book' });
+    await emit({ kind: 'tool_result', id: 'search', isError: false });
+    expect(boundary.glossary).toHaveBeenCalledTimes(loads);
+    boundary.glossary.mockResolvedValue([entry, { ...entry, term: 'Futur', page: 50 }]);
+    await emit({ kind: 'tool_result', id: 'add', isError: false });
+    expect(useGlossaryStore.getState().books['book']?.entries).toHaveLength(2);
+    await emit({ kind: 'done', text: 'Le type sommet. [⊤](#glossary-%E2%8A%A4)' });
+    const link = host.querySelector('a[href="#glossary-%E2%8A%A4"]');
+    if (!(link instanceof HTMLAnchorElement)) throw new Error('Missing glossary reference');
+    await act(async () => link.click());
+    expect(useSidebarStore.getState().isSideBarVisible).toBe(true);
+    expect(useGlossaryStore.getState().focusRequest).toMatchObject({ hash: 'book', term: '⊤' });
+    const newConversation = host.querySelector('button[title="Nouvelle conversation"]');
+    if (!(newConversation instanceof HTMLButtonElement)) throw new Error('Missing new conversation button');
+    await act(async () => {
+      useChatStore.getState().updateReading('book', { maxPage: 2, currentPage: 2 });
+      newConversation.click();
+    });
+    await ask('Que signifie ⊤ à nouveau ?');
+    expect(boundary.send.mock.calls.at(-1)?.[1].glossaryTerms).toEqual(['⊤']);
+  });
+
+  it('abandons a pending send when its book changes during glossary loading', async () => {
+    let resolveLoad: (value: GlossaryEntry[]) => void = () => {};
+    boundary.glossary.mockImplementation((hash) => hash === 'book' ? new Promise((resolve) => { resolveLoad = resolve; }) : Promise.resolve([]));
+    await ask('A question for the old book');
+    await act(async () => useSidebarStore.getState().setSideBarBookKey('next-view'));
+    await act(async () => resolveLoad([]));
+    expect(boundary.send).not.toHaveBeenCalled();
+    expect(bubbleTexts()).not.toContain('A question for the old book');
+  });
+
   it('follows growth at the bottom, then preserves old history through fragments and final replacement', async () => {
     await ask('A new question');
     await emit({ kind: 'text', text: 'First fragment. ' });
