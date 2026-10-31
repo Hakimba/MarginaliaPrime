@@ -37,7 +37,8 @@ interface RustStartInfo {
 }
 
 /** The reader's tools, as the CLI names MCP tools: `mcp__<server>__<tool>`. */
-export const READER_TOOLS = ['search_book', 'get_pages', 'get_toc'].map((t) => `mcp__reader__${t}`);
+export const READER_TOOLS = ['search_book', 'get_pages', 'get_toc', 'get_glossary', 'add_to_glossary']
+  .map((t) => `mcp__reader__${t}`);
 
 /**
  * Build the CLI argument list. Kept separate and pure so the Inspect overlay

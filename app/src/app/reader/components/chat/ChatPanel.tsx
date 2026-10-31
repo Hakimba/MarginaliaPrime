@@ -35,6 +35,8 @@ import { perfMark, perfRender } from '@/utils/perf';
 import { useSidebarStore } from '@/store/sidebarStore';
 import { useReaderStore } from '@/store/readerStore';
 import { useBookDataStore } from '@/store/bookDataStore';
+import { useGlossaryStore } from '@/store/glossaryStore';
+import { glossaryTermFromHref, observeGlossaryTools } from '@/services/glossary';
 
 import {
   ClaudeCliEngine,
@@ -210,6 +212,13 @@ const mayShow = (reading: ReadingState | null, page: number): boolean => {
 const unitLabel = (reading: ReadingState | null, n: number): string =>
   reading && !reading.fixedLayout ? `section ${n}` : `p. ${n}`;
 
+const closeOpenedPages = () => {
+  const s = useChatStore.getState();
+  for (const reading of Object.values(s.readings)) {
+    if (reading.allowedWindow) s.updateReading(reading.hash, { allowedWindow: null });
+  }
+};
+
 /** Whether the book the panel talks about is a PDF, whose pages links go to. */
 const currentFixedLayout = (): boolean => {
   const key = useSidebarStore.getState().sideBarBookKey;
@@ -232,6 +241,10 @@ const toolLabel = (name: string, input: unknown): string => {
     }
     case 'mcp__reader__get_toc':
       return 'Lecture de la table des matières';
+    case 'mcp__reader__get_glossary':
+      return 'Consultation du glossaire';
+    case 'mcp__reader__add_to_glossary':
+      return args['term'] ? `Ajout au glossaire : ${String(args['term'])}` : 'Ajout au glossaire';
     case 'WebSearch':
       return args['query'] ? `Recherche web : ${String(args['query'])}` : 'Recherche web';
     default:
@@ -447,7 +460,19 @@ const ChatPanel: React.FC = () => {
 
   const model = useMemo(() => findModel(backendId, modelId), [backendId, modelId]);
 
+  const engineOff = useRef<(() => void) | null>(null);
+  const resetReply = useCallback(() => {
+    setIsStreaming(false);
+    setStreamingContent('');
+    setActiveTool(null);
+    accumulated.current = '';
+    turnTools.current = [];
+    turnUnread.current = [];
+  }, []);
+
   const stopEngine = useCallback(async () => {
+    engineOff.current?.();
+    engineOff.current = null;
     const engine = engineRef.current;
     engineRef.current = null;
     engineSignature.current = '';
@@ -455,14 +480,19 @@ const ChatPanel: React.FC = () => {
     if (engine) await engine.abort();
   }, []);
 
+  useEffect(() => () => { closeOpenedPages(); void stopEngine(); }, [stopEngine]);
+
   // Switch book: load its conversations and drop the running process.
   useEffect(() => {
     if (!sideBarBookKey) return;
     const hash = sideBarBookKey.split('-')[0] || '';
     if (!hash || hash === currentBookHash.current) return;
     flushPendingSave();
+    closeOpenedPages();
+    resetReply();
     currentBookHash.current = hash;
     useChatStore.getState().setBookHash(hash);
+    void useGlossaryStore.getState().reload(hash).catch(() => {});
     // Passages of the previous book would go into this book's conversation.
     useChatStore.getState().clearSelections();
     void stopEngine();
@@ -576,17 +606,6 @@ const ChatPanel: React.FC = () => {
       if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     };
   }, [messages, bookHash, conversationId, sessionId]);
-
-  /**
-   * Pages the reader opened for a question close with the turn, however it
-   * ends: a failed or aborted turn must not leave them open for the next.
-   */
-  const closeOpenedPages = () => {
-    const s = useChatStore.getState();
-    for (const reading of Object.values(s.readings)) {
-      if (reading.allowedWindow) s.updateReading(reading.hash, { allowedWindow: null });
-    }
-  };
 
   const onEngineEvent = useCallback((event: EngineEvent) => {
     const line = `${event.kind}: ${summarize(event)}`;
@@ -758,9 +777,10 @@ const ChatPanel: React.FC = () => {
       // conversation id from the store afterwards, not from this closure, which
       // may predate the index landing.
       await conversationsReady.current;
+      if (useChatStore.getState().bookHash !== bookHash) return null;
       const conversationId = useChatStore.getState().conversationId;
 
-      const signature = `${backendId}:${model.id}:${webSearchEnabled}:${conversationId}`;
+      const signature = `${bookHash}:${backendId}:${model.id}:${webSearchEnabled}:${conversationId}`;
       // `allowResume: false` is the recovery path: the running process is the one
       // that just failed, so reusing it would send the turn into a dead pipe.
       if (allowResume && engineRef.current?.isRunning() && engineSignature.current === signature) {
@@ -769,7 +789,14 @@ const ChatPanel: React.FC = () => {
       await stopEngine();
 
       const engine = new ClaudeCliEngine();
-      engine.subscribe(onEngineEvent);
+      const glossaryEvent = observeGlossaryTools(() => {
+        void useGlossaryStore.getState().reload(bookHash).catch(() => {});
+      });
+      const off = engine.subscribe((event) => {
+        glossaryEvent(event);
+        onEngineEvent(event);
+      });
+      engineOff.current = off;
       // Resuming only makes sense when the reader can see the history that the
       // model will remember. An empty transcript always starts a fresh session.
       const resume =
@@ -796,6 +823,11 @@ const ChatPanel: React.FC = () => {
           },
           ...(resume ? { resumeSessionId: resume } : {}),
         });
+        if (useChatStore.getState().bookHash !== bookHash || useChatStore.getState().conversationId !== conversationId) {
+          off();
+          await engine.abort();
+          return null;
+        }
         engineRef.current = engine;
         engineSignature.current = signature;
         toolsReported.current = false;
@@ -803,6 +835,7 @@ const ChatPanel: React.FC = () => {
         setError(null);
         return engine;
       } catch (e) {
+        off();
         reportError(e instanceof Error ? e.message : String(e));
         return null;
       }
@@ -828,6 +861,7 @@ const ChatPanel: React.FC = () => {
     // Read the store, not this render's closure: the chapter text may have
     // landed while the turn was being prepared.
     const s = useChatStore.getState();
+    const glossary = useGlossaryStore.getState().books[s.bookHash];
     return {
       bookTitle: s.bookTitle,
       bookAuthor: s.bookAuthor,
@@ -843,6 +877,9 @@ const ChatPanel: React.FC = () => {
       pages: s.contextPages.filter((p) => mayShow(readingOf(s, s.bookHash), p.page)),
       position: [s.position, readingNote(readingOf(s, s.bookHash))].filter(Boolean).join(' · '),
       selections: s.pendingSelections.map(toEngineSelection),
+      ...(glossary?.kind === 'ready' ? {
+        glossaryTerms: [...new Set(glossary.entries.filter((entry) => mayShow(readingOf(s, s.bookHash), entry.page)).map((entry) => entry.term))],
+      } : {}),
     };
   }, []);
 
@@ -854,7 +891,7 @@ const ChatPanel: React.FC = () => {
     const engine = engineRef.current;
     // A process with another configuration is replaced at the next send, and
     // the new one has sent nothing.
-    const signature = `${backendId}:${model.id}:${webSearchEnabled}:${conversationId}`;
+    const signature = `${bookHash}:${backendId}:${model.id}:${webSearchEnabled}:${conversationId}`;
     return engine?.isRunning() && engineSignature.current === signature
       ? engine.plan(context)
       : planContext(context, { chapterKey: '', pages: new Set() });
@@ -883,6 +920,18 @@ const ChatPanel: React.FC = () => {
   };
 
   const sendTurn = async (text: string, fromPage: boolean) => {
+    await conversationsReady.current;
+    const identity = useChatStore.getState();
+    const sendingBook = identity.bookHash;
+    const sendingConversation = identity.conversationId;
+    let glossaryWarning = '';
+    if (sendingBook) {
+      try {
+        await useGlossaryStore.getState().reload(sendingBook);
+      } catch {
+        glossaryWarning = 'Le glossaire n’a pas pu être actualisé. Claude peut réessayer de le consulter avec son outil.';
+      }
+    }
     // The context is extracted lazily; ask for it now and give it a moment,
     // so the very first question of a session is not sent without it.
     if (useChatStore.getState().contextPending) {
@@ -891,6 +940,8 @@ const ChatPanel: React.FC = () => {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
+
+    if (useChatStore.getState().bookHash !== sendingBook || useChatStore.getState().conversationId !== sendingConversation) return;
 
     // Recorded before the engine starts: a failure can arrive immediately.
     const sentPending = useChatStore.getState().pendingSelections;
@@ -903,6 +954,7 @@ const ChatPanel: React.FC = () => {
       closeOpenedPages();
       return;
     }
+    if (useChatStore.getState().bookHash !== sendingBook || useChatStore.getState().conversationId !== sendingConversation) return;
     // What the model gets is what the transcript shows, even if another
     // selection arrived while the engine was starting.
     const selections = context.selections;
@@ -939,7 +991,7 @@ const ChatPanel: React.FC = () => {
     accumulated.current = '';
     turnTools.current = [];
     turnUnread.current = [];
-    setError(null);
+    setError(glossaryWarning || null);
 
     try {
       await engine.send(text, context);
@@ -959,6 +1011,8 @@ const ChatPanel: React.FC = () => {
   };
 
   const resetConversation = async (id: string) => {
+    closeOpenedPages();
+    resetReply();
     await stopEngine();
     followLatestRef.current = true;
     setConversationId(id);
@@ -993,14 +1047,14 @@ const ChatPanel: React.FC = () => {
 
   const handleAbort = () => {
     closeOpenedPages();
+    resetReply();
     void stopEngine();
-    setIsStreaming(false);
-    setStreamingContent('');
-    accumulated.current = '';
   };
 
   const handleSwitchConversation = async (id: string) => {
     if (id === conversationId) return;
+    closeOpenedPages();
+    resetReply();
     flushPendingSave();
     await stopEngine();
     setConversationId(id);
@@ -1296,8 +1350,20 @@ const ChatPanel: React.FC = () => {
 
   /** « p. 208 » in an answer: take the reader there. PDF only, pages being pages. */
   const handlePageLink = (e: React.MouseEvent<HTMLDivElement>) => {
-    const link = (e.target as HTMLElement).closest?.('a.page-ref') as HTMLAnchorElement | null;
+    if (!(e.target instanceof Element)) return;
+    const link = e.target.closest('a');
     if (!link) return;
+    const term = glossaryTermFromHref(link.getAttribute('href') ?? '');
+    if (term) {
+      e.preventDefault();
+      const hash = useChatStore.getState().bookHash;
+      if (useGlossaryStore.getState().books[hash]?.entries.some((entry) => entry.term === term)) {
+        useGlossaryStore.getState().focus(hash, term);
+        useSidebarStore.getState().setSideBarVisible(true);
+      }
+      return;
+    }
+    if (!link.matches('a.page-ref')) return;
     e.preventDefault();
     const page = Number(link.dataset['page']);
     const key = useSidebarStore.getState().sideBarBookKey;

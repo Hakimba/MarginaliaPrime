@@ -12,6 +12,7 @@ import { useEnv } from '@/context/EnvContext';
 import { useSwipeToDismiss } from '@/hooks/useSwipeToDismiss';
 import { usePanelResize } from '@/hooks/usePanelResize';
 import { useThemeStore } from '@/store/themeStore';
+import { useGlossaryStore } from '@/store/glossaryStore';
 import { Overlay } from '@/components/Overlay';
 import useShortcuts from '@/hooks/useShortcuts';
 import SidebarHeader from './Header';
@@ -36,7 +37,11 @@ const SideBar = ({}) => {
   const { getBookData } = useBookDataStore();
   const { getView, getViewSettings } = useReaderStore();
   const [isSearchBarVisible, setIsSearchBarVisible] = useState(false);
+  const glossaryFocus = useGlossaryStore((s) => s.focusRequest);
   const searchTermRef = useRef(searchTerm);
+  useEffect(() => {
+    if (glossaryFocus?.hash === sideBarBookKey?.split('-')[0]) setIsSearchBarVisible(false);
+  }, [glossaryFocus, sideBarBookKey]);
   const isMobile = window.innerWidth < 640;
   const {
     sideBarWidth,

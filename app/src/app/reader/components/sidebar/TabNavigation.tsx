@@ -3,6 +3,7 @@ import React from 'react';
 import { MdBookmarkBorder } from 'react-icons/md';
 import { IoIosList } from 'react-icons/io';
 import { PiNotePencil } from 'react-icons/pi';
+import { FiBookOpen } from 'react-icons/fi';
 
 import { useEnv } from '@/context/EnvContext';
 import { useTranslation } from '@/hooks/useTranslation';
@@ -14,7 +15,7 @@ const TabNavigation: React.FC<{
   const _ = useTranslation();
   const { appService } = useEnv();
 
-  const tabs = ['toc', 'annotations', 'bookmarks'];
+  const tabs = ['toc', 'annotations', 'bookmarks', 'glossary'];
 
   const getTabLabel = (tab: string) => {
     switch (tab) {
@@ -24,6 +25,8 @@ const TabNavigation: React.FC<{
         return _('Annotate');
       case 'bookmarks':
         return _('Bookmark');
+      case 'glossary':
+        return 'Glossaire';
       default:
         return '';
     }
@@ -61,6 +64,8 @@ const TabNavigation: React.FC<{
               <IoIosList className='mx-auto' />
             ) : tab === 'annotations' ? (
               <PiNotePencil className='mx-auto' />
+            ) : tab === 'glossary' ? (
+              <FiBookOpen className='mx-auto' />
             ) : (
               <MdBookmarkBorder className='mx-auto' />
             )}

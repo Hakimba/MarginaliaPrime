@@ -9,6 +9,7 @@ use tauri::Url;
 mod book_index;
 mod dir_scanner;
 mod engine;
+mod glossary;
 pub mod reader_tools;
 
 use tauri::{Emitter, WebviewUrl, WebviewWindowBuilder};
@@ -105,6 +106,26 @@ fn get_executable_dir() -> String {
         .unwrap_or_default()
 }
 
+#[tauri::command]
+async fn book_glossary_load(app: AppHandle, hash: String) -> Result<Vec<glossary::Entry>, String> {
+    let path = book_index::index_path(&app, &hash)?;
+    tauri::async_runtime::spawn_blocking(move || glossary::load(&path))
+        .await
+        .map_err(|e| format!("Chargement du glossaire impossible : {e}"))?
+}
+
+#[tauri::command]
+async fn book_glossary_add(
+    app: AppHandle,
+    hash: String,
+    entry: glossary::EntryInput,
+) -> Result<Vec<glossary::Entry>, String> {
+    let path = book_index::index_path(&app, &hash)?;
+    tauri::async_runtime::spawn_blocking(move || glossary::add(&path, entry))
+        .await
+        .map_err(|e| format!("Enregistrement du glossaire impossible : {e}"))?
+}
+
 #[derive(Clone, serde::Serialize)]
 #[allow(dead_code)]
 struct SingleInstancePayload {
@@ -153,6 +174,8 @@ pub fn run() {
             book_index::book_index_write,
             book_index::book_state_load,
             book_index::book_state_write,
+            book_glossary_load,
+            book_glossary_add,
         ])
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())

@@ -4,7 +4,7 @@
 //! `main.rs`): no Node, no second program to install, and the path is always
 //! right since the app writes it from its own location. The process has no
 //! window and never touches Tauri; it reads the book index the app wrote and
-//! answers three tools: `search_book`, `get_pages`, `get_toc`.
+//! answers book search, page retrieval, table of contents and glossary tools.
 //!
 //! The index may still be under construction when the conversation starts, so
 //! it is read again whenever the file changes.
@@ -96,7 +96,9 @@ impl ReadingState {
     /// Whether the model may be shown this page.
     pub fn visible(&self, page: usize) -> bool {
         self.spoilers_allowed
-            || self.max().map_or(true, |max| page <= max + AHEAD)
+            || self
+                .max()
+                .map_or(true, |max| page <= max.saturating_add(AHEAD))
             || self
                 .allowed_window
                 .is_some_and(|[from, to]| page >= from && page <= to)
@@ -702,6 +704,28 @@ fn tool_list() -> Value {
             "name": "get_toc",
             "description": "Table des matières du livre, avec le numéro de page de chaque entrée.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "get_glossary",
+            "description": "Consulte les explications déjà mémorisées pour ce livre, y compris dans les conversations précédentes. query retrouve exactement un terme ou symbole (sensible à la casse) ; sans query, renvoie les entrées autorisées par l'anti-spoiler.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "query": { "type": "string", "maxLength": 200 } }
+            }
+        },
+        {
+            "name": "add_to_glossary",
+            "description": "Mémorise un terme ou symbole expliqué au lecteur avec sa page PDF ou section EPUB de référence. Une sélection ou une page fournie par le lecteur peut servir de référence même au-delà de sa progression, sans autoriser la lecture de contenu masqué. Renvoie uniquement l'entrée enregistrée. Le même terme à la même page est mis à jour ; à une autre page, il conserve un sens distinct.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "term": { "type": "string", "minLength": 1, "maxLength": 200 },
+                    "latex": { "type": "string", "maxLength": 2000 },
+                    "explanation": { "type": "string", "minLength": 1, "maxLength": 8000 },
+                    "page": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+                },
+                "required": ["term", "explanation", "page"]
+            }
         }
     ]})
 }
@@ -735,6 +759,17 @@ impl IndexSource {
             .unwrap_or_default()
     }
 
+    fn glossary_state(&self) -> Result<ReadingState, String> {
+        match std::fs::read_to_string(self.state_path()) {
+            Ok(raw) => serde_json::from_str(&raw)
+                .map_err(|e| format!("Permissions de lecture illisibles ; glossaire refusé : {e}")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ReadingState::default()),
+            Err(e) => Err(format!(
+                "Permissions de lecture inaccessibles ; glossaire refusé : {e}"
+            )),
+        }
+    }
+
     fn get(&mut self) -> Result<&BookIndex, String> {
         let modified = std::fs::metadata(&self.path)
             .and_then(|m| m.modified())
@@ -761,7 +796,122 @@ fn arg_usize(args: &Value, key: &str) -> Option<usize> {
         .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
+/// Models write a page as `"2"` or `2.0`, and an absent formula as `null`:
+/// read them as the integer and the empty string they mean, instead of losing
+/// the entry for a formatting quirk. Anything else is left to the parser.
+fn normalize_entry_args(args: &Value) -> Value {
+    let mut args = args.clone();
+    if let Some(obj) = args.as_object_mut() {
+        if let Some(page) = obj.get("page") {
+            let whole = match page {
+                Value::String(s) => s.trim().parse::<u64>().ok(),
+                Value::Number(n) => n
+                    .as_f64()
+                    .filter(|f| f.fract() == 0.0 && *f >= 0.0)
+                    .map(|f| f as u64),
+                _ => None,
+            };
+            if let Some(whole) = whole {
+                obj.insert("page".into(), json!(whole));
+            }
+        }
+        if obj.get("latex").is_some_and(Value::is_null) {
+            obj.insert("latex".into(), json!(""));
+        }
+    }
+    args
+}
+
+/// The visible entries, as JSON, within the size one call may return; the
+/// entries left out are named so the model can ask for them one by one.
+fn glossary_reply(entries: Vec<crate::glossary::Entry>) -> Result<String, String> {
+    let mut shown = Vec::new();
+    let mut size = 2;
+    let mut omitted = Vec::new();
+    for entry in entries {
+        let one =
+            serde_json::to_string(&entry).map_err(|e| format!("Glossaire illisible : {e}"))?;
+        if omitted.is_empty() && size + one.len() < MAX_CHARS_PER_CALL {
+            size += one.len() + 1;
+            shown.push(entry);
+        } else {
+            omitted.push(entry.term);
+        }
+    }
+    let mut out =
+        serde_json::to_string(&shown).map_err(|e| format!("Glossaire illisible : {e}"))?;
+    if !omitted.is_empty() {
+        let mut names = String::new();
+        for term in &omitted {
+            if names.len() + term.len() > 4_000 {
+                names.push_str(", …");
+                break;
+            }
+            if !names.is_empty() {
+                names.push_str(", ");
+            }
+            names.push_str(term);
+        }
+        out.push_str(&format!(
+            "\n{} autres entrées non affichées (limite de taille) ; demande-les une à une avec query : {names}",
+            omitted.len()
+        ));
+    }
+    Ok(out)
+}
+
 pub fn call_tool(source: &mut IndexSource, name: &str, args: &Value) -> Result<String, String> {
+    if matches!(name, "get_glossary" | "add_to_glossary") {
+        if !args.is_object() {
+            return Err("Les paramètres du glossaire doivent être un objet JSON.".into());
+        }
+        if name == "add_to_glossary" {
+            let input: crate::glossary::EntryInput =
+                serde_json::from_value(normalize_entry_args(args)).map_err(|e| {
+                    format!(
+                        "Entrée du glossaire invalide : term et explanation sont du texte, page un entier de 1 à 1 000 000, latex du texte facultatif ({e})."
+                    )
+                })?;
+            let term = input.term.trim().to_string();
+            let page = input.page;
+            let saved: Vec<_> = crate::glossary::add(&source.path, input)?
+                .into_iter()
+                .filter(|entry| entry.term == term && entry.page == page)
+                .collect();
+            return serde_json::to_string(&saved).map_err(|e| format!("Glossaire illisible : {e}"));
+        }
+        let state = source.glossary_state()?;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct QueryInput {
+            query: Option<String>,
+        }
+        let input: QueryInput = serde_json::from_value(args.clone())
+            .map_err(|e| format!("Recherche du glossaire invalide : {e}"))?;
+        if input
+            .query
+            .as_ref()
+            .is_some_and(|query| query.chars().count() > 200)
+        {
+            return Err("La recherche du glossaire est limitée à 200 caractères.".into());
+        }
+        // An empty query names no term: the whole visible glossary.
+        let query = input
+            .query
+            .map(|query| query.trim().to_string())
+            .filter(|query| !query.is_empty());
+        let entries = crate::glossary::load(&source.path)?;
+        let visible: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| {
+                state.visible(entry.page)
+                    && query
+                        .as_ref()
+                        .map_or(true, |query| entry.term.trim() == query)
+            })
+            .collect();
+        return glossary_reply(visible);
+    }
     let state = source.state();
     let index = source.get()?;
     match name {
@@ -1170,7 +1320,22 @@ mod tests {
             &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 3);
+        let names: Vec<_> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "search_book",
+                "get_pages",
+                "get_toc",
+                "get_glossary",
+                "add_to_glossary"
+            ]
+        );
 
         // No index yet: a readable tool error, not a crash.
         let call = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_toc","arguments":{}}});
@@ -1193,5 +1358,274 @@ mod tests {
         .unwrap();
         assert_eq!(unknown["error"]["code"], -32601);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn glossary_saves_a_selected_definition_without_granting_read_access() {
+        let dir = std::env::temp_dir().join(format!(
+            "reader-glossary-selected-definition-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("book.json");
+        let mut source = IndexSource::new(path.clone());
+        for (term, page) in [("CDF", 187), ("future", 188), ("later", 200)] {
+            call_tool(
+                &mut source,
+                "add_to_glossary",
+                &json!({"term":term,"explanation":"previous hidden explanation","page":page}),
+            )
+            .unwrap();
+        }
+        std::fs::write(source.state_path(), r#"{"maxPage":176}"#).unwrap();
+        let input = json!({"term":" CDF ","explanation":"Explanation given for the selected passage","page":187});
+        let saved: Vec<crate::glossary::Entry> =
+            serde_json::from_str(&call_tool(&mut source, "add_to_glossary", &input).unwrap())
+                .unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].term, "CDF");
+        assert_eq!(saved[0].page, 187);
+        assert_eq!(saved[0].explanation, input["explanation"]);
+        assert_eq!(crate::glossary::load(&path).unwrap().len(), 3);
+        for query in [json!({}), json!({"query":"CDF"}), json!({"query":"future"})] {
+            assert_eq!(
+                call_tool(&mut source, "get_glossary", &query).unwrap(),
+                "[]"
+            );
+        }
+        std::fs::write(
+            source.state_path(),
+            r#"{"maxPage":176,"allowedWindow":[187,188]}"#,
+        )
+        .unwrap();
+        let visible: Vec<crate::glossary::Entry> =
+            serde_json::from_str(&call_tool(&mut source, "get_glossary", &json!({})).unwrap())
+                .unwrap();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0], saved[0]);
+        assert_eq!(visible[1].term, "future");
+        std::fs::write(source.state_path(), r#"{"maxPage":176}"#).unwrap();
+        assert_eq!(
+            call_tool(&mut source, "get_glossary", &json!({})).unwrap(),
+            "[]"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn glossary_works_without_index_and_rereads_permissions_every_call() {
+        let dir = std::env::temp_dir().join(format!(
+            "reader-glossary-permissions-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("book.json");
+        let mut source = IndexSource::new(path.clone());
+        assert_eq!(
+            call_tool(&mut source, "get_glossary", &json!({})).unwrap(),
+            "[]"
+        );
+        for (term, page) in [("X", 2), ("x", 2), ("future", 20)] {
+            call_tool(
+                &mut source,
+                "add_to_glossary",
+                &json!({"term":term,"explanation":"Définition","page":page}),
+            )
+            .unwrap();
+        }
+        let exact: Value = serde_json::from_str(
+            &call_tool(&mut source, "get_glossary", &json!({"query":" X "})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(exact.as_array().unwrap().len(), 1);
+        assert_eq!(exact[0]["term"], "X");
+
+        std::fs::write(source.state_path(), r#"{"maxPage":2}"#).unwrap();
+        assert!(!call_tool(&mut source, "get_glossary", &json!({}))
+            .unwrap()
+            .contains("future"));
+        call_tool(
+            &mut source,
+            "add_to_glossary",
+            &json!({"term":"hidden","explanation":"secret","page":20}),
+        )
+        .unwrap();
+        assert_eq!(
+            call_tool(&mut source, "get_glossary", &json!({"query":"future"})).unwrap(),
+            "[]"
+        );
+
+        std::fs::write(
+            source.state_path(),
+            r#"{"maxPage":2,"allowedWindow":[20,21]}"#,
+        )
+        .unwrap();
+        assert!(call_tool(&mut source, "get_glossary", &json!({}))
+            .unwrap()
+            .contains("future"));
+        call_tool(
+            &mut source,
+            "add_to_glossary",
+            &json!({"term":"window","explanation":"window definition","page":20}),
+        )
+        .unwrap();
+        std::fs::write(source.state_path(), r#"{"maxPage":2}"#).unwrap();
+        let added = call_tool(
+            &mut source,
+            "add_to_glossary",
+            &json!({"term":"now","explanation":"current definition","page":2}),
+        )
+        .unwrap();
+        assert!(!added.contains("future") && !added.contains("window"));
+        let added_entries: Vec<crate::glossary::Entry> = serde_json::from_str(&added).unwrap();
+        assert_eq!(added_entries.len(), 1);
+        assert_eq!(added_entries[0].term, "now");
+        std::fs::write(
+            source.state_path(),
+            r#"{"maxPage":2,"spoilersAllowed":true}"#,
+        )
+        .unwrap();
+        assert!(call_tool(&mut source, "get_glossary", &json!({}))
+            .unwrap()
+            .contains("window"));
+
+        std::fs::write(&path, r#"{"pageCount":10,"complete":false}"#).unwrap();
+        assert!(call_tool(
+            &mut source,
+            "add_to_glossary",
+            &json!({"term":"outside","explanation":"outside book","page":11})
+        )
+        .is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn glossary_reads_fail_closed_for_corrupt_permissions_and_writes_preserve_corrupt_storage() {
+        let dir =
+            std::env::temp_dir().join(format!("reader-glossary-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("book.json");
+        let mut source = IndexSource::new(path.clone());
+        let input = json!({"term":"x","explanation":"definition","page":2});
+        call_tool(&mut source, "add_to_glossary", &input).unwrap();
+        for corrupt in ["{broken", r#"{"spoilersAllowed":"true"}"#, "null"] {
+            std::fs::write(source.state_path(), corrupt).unwrap();
+            assert!(call_tool(&mut source, "get_glossary", &json!({})).is_err());
+            let saved: Vec<crate::glossary::Entry> =
+                serde_json::from_str(&call_tool(&mut source, "add_to_glossary", &input).unwrap())
+                    .unwrap();
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].term, "x");
+            assert_eq!(saved[0].explanation, "definition");
+            assert_eq!(saved[0].page, 2);
+            assert_eq!(crate::glossary::load(&path).unwrap(), saved);
+            assert!(call_tool(&mut source, "get_glossary", &json!({})).is_err());
+        }
+        std::fs::remove_file(source.state_path()).unwrap();
+        std::fs::write(crate::glossary::glossary_path(&path), b"broken glossary").unwrap();
+        let call = json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"add_to_glossary","arguments":input}});
+        assert_eq!(
+            handle(&mut source, &call).unwrap()["result"]["isError"],
+            true
+        );
+        assert_eq!(
+            std::fs::read(crate::glossary::glossary_path(&path)).unwrap(),
+            b"broken glossary"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn glossary_accepts_the_number_formats_models_write_and_an_empty_query() {
+        let dir =
+            std::env::temp_dir().join(format!("reader-glossary-formats-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("book.json");
+        let mut source = IndexSource::new(path.clone());
+        for args in [
+            json!({"term":"a","explanation":"d","page":"2"}),
+            json!({"term":"b","explanation":"d","page":3.0}),
+            json!({"term":"c","latex":null,"explanation":"d","page":4}),
+        ] {
+            call_tool(&mut source, "add_to_glossary", &args).expect("accepted");
+        }
+        let pages: Vec<usize> = crate::glossary::load(&path)
+            .unwrap()
+            .iter()
+            .map(|e| e.page)
+            .collect();
+        assert_eq!(pages, vec![2, 3, 4]);
+        let all: Vec<crate::glossary::Entry> = serde_json::from_str(
+            &call_tool(&mut source, "get_glossary", &json!({"query":""})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(all.len(), 3);
+        let err = call_tool(
+            &mut source,
+            "add_to_glossary",
+            &json!({"term":"x","explanation":"d","page":"deux"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("page un entier"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn glossary_reply_stays_within_one_call_and_names_the_rest() {
+        let entries: Vec<crate::glossary::Entry> = (0..300)
+            .map(|n| crate::glossary::Entry {
+                term: format!("t{n}"),
+                latex: String::new(),
+                explanation: "x".repeat(500),
+                page: 1,
+                date: 0,
+            })
+            .collect();
+        let out = glossary_reply(entries).unwrap();
+        assert!(out.len() < MAX_CHARS_PER_CALL + 5_000, "{}", out.len());
+        let (json_part, note) = out.split_once('\n').unwrap();
+        let shown: Vec<crate::glossary::Entry> = serde_json::from_str(json_part).unwrap();
+        assert!(!shown.is_empty() && shown.len() < 300);
+        assert!(
+            note.contains(&format!("{} autres entrées", 300 - shown.len())),
+            "{note}"
+        );
+        assert!(note.contains("t299"), "{note}");
+    }
+
+    #[test]
+    fn glossary_tools_reject_non_objects_unknown_fields_and_wrong_types() {
+        let dir =
+            std::env::temp_dir().join(format!("reader-glossary-arguments-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("book.json");
+        let mut source = IndexSource::new(path.clone());
+        for args in [
+            Value::Null,
+            json!([]),
+            json!(["x"]),
+            json!({"unknown":"x"}),
+            json!({"query":12}),
+            json!({"query":"x".repeat(201)}),
+        ] {
+            assert!(
+                call_tool(&mut source, "get_glossary", &args).is_err(),
+                "accepted {args}"
+            );
+        }
+        for args in [
+            Value::Null,
+            json!([]),
+            json!(["x", "", "definition", 1]),
+            json!({"term":"x","explanation":"definition","page":1,"date":0}),
+            json!({"term":"x","explanation":"definition","page":1.5}),
+        ] {
+            assert!(
+                call_tool(&mut source, "add_to_glossary", &args).is_err(),
+                "accepted {args}"
+            );
+        }
+        assert!(crate::glossary::load(&path).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
